@@ -1,0 +1,15 @@
+# The viewer has its own environment so that CairoMakie -- a heavy
+# dependency that nothing in `src/` needs -- never becomes a dependency of
+# the package. The `[sources]` entries make
+# `julia --project=bin bin/visualize.jl` work from a fresh checkout with
+# no manual `Pkg.develop`.
+
+[deps]
+CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+SixelTerm = "65edfddc-f399-4499-8369-a1bd38eee2ea"
+TreeAMR = "91bc416d-811c-44c1-9bc4-b9c8bbdbbd08"
+TreeWave = "6acacbb1-3a21-4f63-beb8-8f5fda648e50"
+
+[sources]
+TreeAMR = {url = "https://github.com/eschnett/TreeAMR.jl", rev = "main"}
+TreeWave = {path = ".."}

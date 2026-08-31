@@ -1,0 +1,17 @@
+name = "TreeWave"
+uuid = "6acacbb1-3a21-4f63-beb8-8f5fda648e50"
+version = "0.1.0"
+authors = ["Erik Schnetter <schnetter@gmail.com>"]
+
+[deps]
+KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
+OrdinaryDiffEqLowOrderRK = "1344f307-1e59-4825-a18e-ace9aa3fa4c6"
+SciMLBase = "0bca4576-84f4-4d90-8ffe-ffa030f20462"
+TreeAMR = "91bc416d-811c-44c1-9bc4-b9c8bbdbbd08"
+
+[compat]
+KernelAbstractions = "0.9.42, 1"
+OrdinaryDiffEqLowOrderRK = "2.2.5"
+SciMLBase = "3.50.1"
+TreeAMR = "0.1.0"
+julia = "1.10"
