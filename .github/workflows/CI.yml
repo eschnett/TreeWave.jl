@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Julia ${{ matrix.version }} - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Julia 1.11 is the floor: TreeAMR is unregistered, so Project.toml
+        # locates it through a `[sources]` entry, which 1.11 introduced.
+        version: ["1.11", "1"]
+        os: [ubuntu-latest, macOS-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: ${{ matrix.version }}
+      - uses: julia-actions/cache@v3
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: julia-actions/julia-runtest@v1
+
+  # The viewer has its own environment and its own copy of the TreeAMR
+  # dependency, so the test job above cannot exercise it -- during
+  # development that let `bin/` keep building against an older TreeAMR than
+  # the tests, until it failed on an API the tests were already using. This
+  # job runs it for real and keeps the figures, so a plot that silently
+  # stops making sense is visible rather than merely unbroken.
+  viewer:
+    name: Viewer (bin/)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: "1"
+      - uses: julia-actions/cache@v3
+      - name: Instantiate the viewer environment
+        run: julia --project=bin -e 'using Pkg; Pkg.instantiate()'
+      - name: Render both cases
+        run: julia --project=bin bin/visualize.jl --no-display
+      - name: Check that both figures were written
+        run: |
+          test -s bin/output/sine_1d.png
+          test -s bin/output/pulse_1d.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: figures
+          path: bin/output/*.png

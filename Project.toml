@@ -14,4 +14,12 @@ KernelAbstractions = "0.9.42, 1"
 OrdinaryDiffEqLowOrderRK = "2.2.5"
 SciMLBase = "3.50.1"
 TreeAMR = "0.1.0"
-julia = "1.10"
+julia = "1.11"
+
+# TreeAMR is not in the General registry, so a clean clone has no way to
+# find it: `Manifest.toml` is not tracked, and Project.toml alone carries
+# only the UUID. This is what makes `Pkg.instantiate()` work from a fresh
+# checkout, and therefore what makes CI possible. It also requires Julia
+# 1.11, hence the compat bound above.
+[sources]
+TreeAMR = {url = "https://github.com/eschnett/TreeAMR.jl", rev = "main"}

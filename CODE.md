@@ -290,6 +290,7 @@ already three near-identical time-stepping loops in `src/`; a fourth in
 | `test/refinement_tests.jl` | claims about the indicator itself |
 | `test/supergaussian_tests.jl` | a moving refined region tracks the pulse |
 | `bin/visualize.jl` | CairoMakie viewer (own environment; see `bin/Project.toml`) |
+| `.github/workflows/CI.yml` | tests on a Julia matrix, plus a job that renders the figures |
 
 The viewer draws three panels per case — the solution, the pointwise error
 in `u`, and the volume-weighted L2/L∞ norms over the whole state against
@@ -302,6 +303,19 @@ The tests are ported from TreeAMR's own `test/wave_tests.jl`, minus its
 "RHS does not mutate the state vector" testset — that one guards TreeAMR's
 `scatter!`/`gather!` contract rather than anything about the wave
 equation, and belongs upstream where it already lives.
+
+CI runs the test suite on Julia 1.11 and release, on Linux and macOS, and
+separately renders both figures and keeps them as artifacts. The second job
+exists because `bin/` carries its own environment and therefore its own copy
+of the TreeAMR dependency: during development that let the viewer keep
+building against an older TreeAMR than the tests, until it failed on an API
+the tests were already using. Nothing in the test job could have caught that.
+
+Julia 1.11 is the floor, and not by preference: TreeAMR is unregistered, so
+`Project.toml` locates it with a `[sources]` entry, which 1.11 introduced.
+Without it a clean checkout cannot resolve at all — `Manifest.toml` is not
+tracked, and Project.toml alone carries only a UUID — which is also why CI
+was impossible before this.
 
 Visualization lives in `bin/` and not in the package because CairoMakie is
 a heavy dependency that nothing in `src/` needs. `bin/` carries its own
