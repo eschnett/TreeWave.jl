@@ -1,5 +1,8 @@
 # The travelling super-Gaussian pulse: a localized feature, so what it
 # measures is whether a *moving* refined region follows it.
+#
+# The mesh is steered by the per-cell criterion in `refinement.jl`; the
+# claims about the indicator itself are in `refinement_tests.jl`.
 
 @testset "A moving refined region tracks a propagating pulse" begin
     # The measure of "without artifacts" is that the adaptive run matches
@@ -8,7 +11,7 @@
     σ = 0.08
     coarse = uniform_pulse(Val(1); roots=8, N=8, σ=σ)     # level-0 equivalent
     fine = uniform_pulse(Val(1); roots=8, N=32, σ=σ)      # level-2 equivalent
-    amr = track_pulse(Val(1); roots=8, N=8, σ=σ, threshold=1e-3, chunk=0.02)
+    amr = track_pulse(Val(1); roots=8, N=8, σ=σ, chunk=0.02)
 
     # Refinement is worth having at all: the coarse mesh is far worse.
     @test coarse.err > 10 * fine.err

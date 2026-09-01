@@ -146,6 +146,110 @@ help, because the two sides of an interface get their ghosts from
 different operators. `test/sinewave_tests.jl` asserts all four
 combinations, so the rule is guarded here and not merely documented.
 
+## The refinement criterion
+
+Refinement is for **resolution**, not amplitude. The first version of this
+package refined where `|u|` was large, which worked only because the pulse sat on
+a zero background — on the sine mode, whose amplitude is O(1) everywhere, it would
+have refined the whole domain. It also fixed the depth by fiat (`maxlevel_wanted=2`,
+so every block was at level 2 or level 0) and read only `u`, missing features
+carried by `∂ₜu`, which has an order of magnitude more amplitude.
+
+[`src/refinement.jl`](src/refinement.jl) replaces it with a per-cell
+[Löhner](https://doi.org/10.1016/0961-3552(91)90006-T)-style indicator,
+
+    τ = |uᵢ₊₁ - 2uᵢ + uᵢ₋₁| / (|uᵢ₊₁ - uᵢ| + |uᵢ - uᵢ₋₁| + 4ε·scale)
+
+taken over every interior cell, dimension, and variable. The differences are
+undivided, so the spacing enters implicitly: τ measures how well the *mesh*
+resolves what it holds, not the data's curvature. For smooth data τ therefore
+*falls* as `h` shrinks, and that is what makes refinement terminate on its own.
+τ ∈ [0, 1], since the numerator is bounded by the two first differences.
+
+### The noise floor must be global
+
+Löhner's classic form floors the denominator with the local
+`ε(|uᵢ₊₁| + 2|uᵢ| + |uᵢ₋₁|)`. That is scale-free, and scale-free is fatal here: in
+the pulse's far tail three consecutive values of `3.9e-16, 3.6e-17, 3.6e-17` — ten
+orders of magnitude below the peak — score `τ = 0.986`, because the floor shrinks
+along with them. Measured consequence: the criterion refined the entire domain at
+every threshold tried, 32 blocks where 16 were wanted. Referring the floor to a
+global per-variable amplitude ([`field_scales`](src/refinement.jl)) fixes it —
+negligible regions then get a negligible numerator against a fixed floor. After
+the fix the pulse's tail blocks score τ = 0.0000 against the feature's 0.79.
+
+Since the wave equation conserves amplitude, the scale is measured once from the
+initial data and reused; a problem that grows or decays by orders of magnitude
+would have to refresh it.
+
+### Two thresholds, meaning two different things
+
+- `refine_tol` is *"under-resolved here"* — go finer.
+- `coarsen_tol` is *"there is something here at all"* — the feature is present,
+  even if adequately resolved.
+
+Which gives the four marks in [`refine_mark`](src/refinement.jl): `(Refine, box)`
+below the cap, `(Keep, box)` at it, a bare `Coarsen` where nothing fired, and a
+bare `Keep` otherwise. The gap between the thresholds is also the hysteresis dead
+band, so a block near one threshold cannot flip on alternate regrids.
+
+The box is the bounding box of cells above **`coarsen_tol`**, not `refine_tol`, and
+that choice is load-bearing. A block refined to the cap has by construction stopped
+being under-resolved — its τ fell below `refine_tol`, which is precisely why
+refinement stopped there — so keying the box on `refine_tol` would make a
+feature-holding block at the cap report nothing, and the `(Keep, box)` margin below
+would be unreachable in the one case it exists for.
+
+τ vanishes wherever the second difference does, so a Gaussian's inflection points
+score zero even though the feature is right there. The reduction to a block verdict
+is `max` over cells rather than a vote, and the box is convex, so both close that
+notch by construction.
+
+### Calibrated thresholds
+
+Löhner's canonical `τ > 0.8` is a shock detector; smooth data never comes close, so
+the thresholds had to be measured. Max τ over the pulse (σ = 0.08) on uniform
+meshes at `roots = 8`, against the depth the criterion then reaches when the cap is
+set to 6 so that the *indicator* has to be what stops it:
+
+| level | h | measured max τ |
+|---|---|---|
+| 0 | 1/64 | 0.794 |
+| 1 | 1/128 | 0.478 |
+| 2 | 1/256 | 0.192 |
+
+| refine_tol | depth reached (cap 6) | blocks | cells |
+|---|---|---|---|
+| 0.15 | 3 | 20 | 160 |
+| 0.20 | 2 | 16 | 128 |
+| 0.30 | 2 | 16 | 128 |
+| 0.45 | 2 | 16 | 128 |
+
+Any `refine_tol` in `[0.20, 0.45]` terminates at level 2, so the defaults are
+`refine_tol = 0.30`, `coarsen_tol = 0.075` — mid-plateau, with the cap never
+binding. Note that an earlier closed-form estimate for τ *at the pulse peak*,
+`(h²/σ²)/(h²/σ² + 4ε)`, gave 0.49 / 0.19 / 0.056: the right shape but about 3×
+low, because the maximum over a block is not at the peak. The measured column is
+the one to trust.
+
+### Buffering: TreeAMR's job, the width ours
+
+TreeAMR dilates the reported boxes by a `buffer` given in cells. The width is the
+application's to choose, because it is physics — feature speed times regrid
+cadence. [`refinement_buffer`](src/refinement.jl) derives it: the wave speed is 1,
+so the pulse travels `chunk` per regrid, and
+
+    buffer = ceil(chunk / spacing(forest, maxlevel_cap)) + 1
+
+The `+ 1` is because TreeAMR's guidance is that the margin must *exceed* the motion
+it covers. It uses the spacing at the cap rather than `minimum_spacing`, which
+reports the *current* finest spacing — coarse while the hierarchy is still being
+built, and so would derive a uselessly narrow margin on the first pass. Since
+recruitment reaches exactly one ring of neighbours, `buffer ≤ N`; that cap is
+really a statement about cadence — the feature may not cross a whole finest-level
+block between regrids — and the derivation throws naming that rather than letting
+the caller meet an opaque rejection inside `regrid!`.
+
 ## Regridding: restart per chunk
 
 Regridding changes both the length and the meaning of the state vector.
@@ -179,9 +283,11 @@ already three near-identical time-stepping loops in `src/`; a fourth in
 |---|---|
 | `src/TreeWave.jl` | module shell: `using`s, exports, includes |
 | `src/evolution.jl` | the RHS kernel, `WaveProblem`, `wave_rhs!`, `convergence_rate` |
+| `src/refinement.jl` | the per-cell refinement indicator and its reduction to block marks |
 | `src/sinewave.jl` | the standing mode and its convergence driver |
 | `src/supergaussian.jl` | the travelling pulse, its AMR driver, and the uniform reference |
 | `test/sinewave_tests.jl` | convergence order, the interface-order rule, 3D smoke test, energy drift |
+| `test/refinement_tests.jl` | claims about the indicator itself |
 | `test/supergaussian_tests.jl` | a moving refined region tracks the pulse |
 | `bin/visualize.jl` | CairoMakie viewer (own environment; see `bin/Project.toml`) |
 
@@ -215,10 +321,29 @@ than as a test that merely still passes.
 - Sine mode, four periods on a two-level mesh: L∞ amplitude within 5% of
   its initial value.
 - Pulse, `n = 1`, `σ = 0.08`, `roots = 8`: uniform-coarse (`N = 8`) L∞
-  error 1.433, uniform-fine (`N = 32`) 0.0928, adaptive (`N = 8`, two
-  levels) 0.0926 — a ratio to the fine reference of 0.998, at 176 cells
-  against the fine mesh's 256. The pulse peak never leaves a refined
-  block over the whole run.
+  error 1.433, uniform-fine (`N = 32`) 0.0928. The adaptive run (`N = 8`,
+  two levels) gives 0.0961 — a ratio to the fine reference of 1.035 — at
+  **128** cells against the fine mesh's 256. The pulse peak never leaves a
+  refined block over the whole run.
+- Old amplitude criterion vs new Löhner criterion on that same run: 0.0926
+  at 176 cells against 0.0961 at 128 cells. The resolution criterion buys a
+  27% cell saving for a 4% error increase, and unlike the old one it is not
+  told the depth — it discovers level 2 and stops there.
+- Buffer width, same run (derived width is 7 cells for `chunk = 0.02`):
+
+  | buffer | worst L∞ | ratio to uniform-fine | cells |
+  |---|---|---|---|
+  | 7 (derived) | 0.0961 | 1.035 | 128 |
+  | 2 (too narrow) | 0.1071 | 1.154 | 128 |
+  | 0 (none) | 0.1454 | 1.566 | 112 |
+
+  Wider is monotonically better here, and only the derived width meets the
+  test's `rtol = 0.1` against the uniform-fine reference. This **does not**
+  reproduce TreeAMR's recorded observation that a margin narrower than the
+  motion measures *slightly worse than no buffer at all*: at `buffer = 2`
+  the error is clearly better than at `buffer = 0`, not worse. Recorded as a
+  contradiction rather than smoothed over — it may be geometry-specific, and
+  TreeAMR measured it on a different setup.
 - Sine mode at 0.9 periods, `N = 16`, `roots = 4`, two levels: final L∞
   0.0063 with order-4 operators against 0.122 with order-2 — a factor of
   19 for a change that touches only the ghost cells. This is the pair the

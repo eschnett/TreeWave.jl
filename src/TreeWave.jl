@@ -17,7 +17,8 @@ Two initial conditions are provided, each measuring something different:
 a standing sine mode (an exact solution, so convergence order can be
 measured) in `sinewave.jl`, and a travelling super-Gaussian pulse (a
 localized feature, so a moving refined region can be exercised) in
-`supergaussian.jl`.
+`supergaussian.jl`. The refinement criterion that drives the adaptive runs
+is in `refinement.jl`.
 
 See `CODE.md` in the package root for the design document, and `bin/` for
 a CairoMakie viewer.
@@ -39,7 +40,12 @@ export wave_omega, wave_exact, wave_forest, wave_errors
 # Initial condition: travelling super-Gaussian pulse
 export supergaussian, dsupergaussian, pulse_exact, track_pulse, uniform_pulse
 
+# Refinement criterion
+export lohner, field_scales, cell_indicator, refine_mark, refine_flags,
+       refinement_buffer
+
 include("evolution.jl")
+include("refinement.jl")
 include("sinewave.jl")
 include("supergaussian.jl")
 

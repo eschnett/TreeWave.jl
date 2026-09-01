@@ -18,10 +18,14 @@
 #      level, with the exact solution overlaid and block boundaries marked
 #      -- seeing *where* the coarse-fine interfaces are is the point;
 #   2. the pointwise error in `u` at the same points, same colouring;
-#   3. the volume-weighted L2 and L∞ error norms against time -- taken over
+#   3. the refinement indicator τ per cell, with the refine and coarsen
+#      thresholds drawn, so the mesh's own decision reads off the figure;
+#   4. the volume-weighted L2 and L∞ error norms against time -- taken over
 #      the *whole* state, `u` and `∂ₜu` together, so that they are the same
 #      quantity the tests assert on. They therefore sit well above panel 2:
 #      for the sine mode `∂ₜu` has amplitude ω, and its error dominates.
+#
+# The first three share an x axis; the fourth is against time.
 #
 # The runs come from `wave_errors` and `track_pulse` via their `observer`
 # keyword, so this script contains no time-stepping loop of its own. See
@@ -40,6 +44,21 @@ const LEVELCOLORS = Makie.wong_colors()
 levelcolor(lvl) = LEVELCOLORS[mod1(lvl + 1, length(LEVELCOLORS))]
 
 """
+The refinement indicator per interior cell of one block, in 1D -- the
+per-cell quantity `cell_indicator` reduces to a single verdict. Recomputed
+here rather than returned by the criterion, because the criterion only ever
+needs the maximum and the bounding box.
+"""
+function block_taus(fs, b, scales; vars=1:fs.nvars, ε=0.01)
+    forest = fs.forest
+    G, N = forest.G, forest.N
+    ws = [blockview(fs, b, v) for v in vars]
+    return [maximum(lohner(w[i - 1], w[i], w[i + 1], s; ε=ε)
+                    for (w, s) in zip(ws, scales))
+            for i in (G + 1):(G + N)]
+end
+
+"""
 One frame of a run: the per-block solution in 1D, and the global error
 norms. Built inside the `observer` callback, where `fs` is scattered from
 `u` and still describes the mesh `u` was computed on -- after a regrid it
@@ -49,6 +68,7 @@ function snapshot(fs, t, u, exactf)
     forest = fs.forest
     G, N = forest.G, forest.N
 
+    scales = field_scales(fs)
     blocks = map(1:nblocks(fs)) do b
         k = blockkey(fs, b)
         # `cell_center` indexes the *stored* array, so interior cell i is
@@ -57,7 +77,7 @@ function snapshot(fs, t, u, exactf)
         num = collect(interiorview(fs, b, 1))
         exact = [exactf((xi,), 1) for xi in x]
         (x=x, u=num, exact=exact, err=num .- exact, lvl=level(k),
-         ext=block_extent(forest, k)[1])
+         tau=block_taus(fs, b, scales), ext=block_extent(forest, k)[1])
     end
 
     # Norms are taken over the whole state vector -- both u and ∂ₜu -- so
@@ -78,11 +98,11 @@ Draw the last frame's solution and error, and the norm history, into one
 figure. `exactf` is the exact solution at the last frame's time, drawn
 densely so it reads as the continuum answer rather than as another mesh.
 """
-function makefigure(snaps, exactf, L, title)
+function makefigure(snaps, exactf, L, title; tols, steering)
     last = snaps[end]
     levels = sort(unique(b.lvl for b in last.blocks))
 
-    fig = Figure(; size=(1000, 900))
+    fig = Figure(; size=(1000, 1150))
     Label(fig[0, 1], title; fontsize=18, font=:bold, tellwidth=false)
 
     ax1 = Axis(fig[1, 1]; ylabel="u",
@@ -91,14 +111,18 @@ function makefigure(snaps, exactf, L, title)
                               sum(length(b.x) for b in last.blocks)))
     ax2 = Axis(fig[2, 1]; ylabel="u − u_exact",
                title="pointwise error in u at the same time")
-    ax3 = Axis(fig[3, 1]; xlabel="t", ylabel="‖error‖",
+    ax3 = Axis(fig[4, 1]; xlabel="t", ylabel="‖error‖",
                yscale=log10,
                title="volume-weighted error norms over the full state (u, ∂ₜu)")
+    ax4 = Axis(fig[3, 1]; ylabel="τ",
+               title=steering ?
+                     "refinement indicator τ — these thresholds steered this mesh" :
+                     "refinement indicator τ — thresholds shown for scale (static mesh)")
 
     # Block boundaries: one vertical rule per interface.
     edges = unique(vcat([b.ext[1] for b in last.blocks],
                         [b.ext[2] for b in last.blocks]))
-    for ax in (ax1, ax2)
+    for ax in (ax1, ax2, ax4)
         vlines!(ax, edges; color=(:gray, 0.3), linewidth=0.5)
     end
 
@@ -112,6 +136,7 @@ function makefigure(snaps, exactf, L, title)
         c = levelcolor(b.lvl)
         lines!(ax1, b.x, b.u; color=c, linewidth=1.6)
         lines!(ax2, b.x, b.err; color=c, linewidth=1.6)
+        lines!(ax4, b.x, b.tau; color=c, linewidth=1.6)
         if ncells <= 400
             # Qualified: TreeAMR exports a `scatter!` of its own, which
             # moves a state vector into the working array.
@@ -120,6 +145,16 @@ function makefigure(snaps, exactf, L, title)
         end
     end
     hlines!(ax2, [0.0]; color=(:black, 0.4), linewidth=0.5)
+
+    # Where τ crosses the upper rule is where the mesh went finer; a block
+    # every one of whose cells is under the lower rule may coarsen.
+    hlines!(ax4, [tols.refine_tol]; color=(:firebrick, 0.9), linewidth=1.2)
+    hlines!(ax4, [tols.coarsen_tol]; color=(:steelblue, 0.9), linewidth=1.2,
+            linestyle=:dash)
+    text!(ax4, 0.004, tols.refine_tol; text=" refine", align=(:left, :bottom),
+          color=:firebrick, fontsize=11)
+    text!(ax4, 0.004, tols.coarsen_tol; text=" coarsen", align=(:left, :top),
+          color=:steelblue, fontsize=11)
 
     Legend(fig[1, 2],
            [LineElement(; color=levelcolor(l), linewidth=2) for l in levels],
@@ -133,11 +168,13 @@ function makefigure(snaps, exactf, L, title)
     l2 = lines!(ax3, ts, nz([s.l2 for s in snaps]); linewidth=2)
     li = lines!(ax3, ts, nz([s.linf for s in snaps]); linewidth=2,
                 linestyle=:dash)
-    Legend(fig[3, 2], [l2, li], ["L2", "L∞"]; framevisible=false,
+    Legend(fig[4, 2], [l2, li], ["L2", "L∞"]; framevisible=false,
            tellheight=false, valign=:top)
 
-    linkxaxes!(ax1, ax2)
+    linkxaxes!(ax1, ax2, ax4)
     hidexdecorations!(ax1; grid=false)
+    hidexdecorations!(ax2; grid=false)
+    ax4.xlabel = "x"
     return fig
 end
 
@@ -179,7 +216,9 @@ function sinecase(; D=1, N=16, L=1.0, m=1, roots=4, periods=0.9,
     title = @sprintf("Standing sine mode, m = %d — two-level mesh, order-%d \
                       operators\nfinal L2 = %.3g, L∞ = %.3g at h = %.3g",
                      m, ops_order, r.l2, r.linf, r.h)
-    return snaps, wave_exact(D, L, m, snaps[end].t), L, title
+    return (snaps=snaps, exactf=wave_exact(D, L, m, snaps[end].t), L=L,
+            title=title, tols=(refine_tol=0.30, coarsen_tol=0.075),
+            steering=false)
 end
 
 """
@@ -188,7 +227,8 @@ blocks should sit under the pulse, and the norms should show what each
 regrid costs.
 """
 function pulsecase(; D=1, N=8, L=1.0, roots=8, σ=0.08, x0=0.25, n=1,
-                   t_end=0.5, chunk=0.02, threshold=1e-3, ops_order=4)
+                   t_end=0.5, chunk=0.02, ops_order=4,
+                   refine_tol=0.30, coarsen_tol=0.075)
     G = ops_order ÷ 2
     snaps = []
     observer = (fs, t, u) -> push!(snaps, snapshot(fs, t, u,
@@ -196,13 +236,16 @@ function pulsecase(; D=1, N=8, L=1.0, roots=8, σ=0.08, x0=0.25, n=1,
     r = track_pulse(Val(D); N=N, G=G, roots=roots, L=L, σ=σ, x0=x0, n=n,
                     ops=Operators(prolongation=ops_order,
                                   restriction=ops_order),
-                    t_end=t_end, chunk=chunk, threshold=threshold,
-                    observer=observer)
+                    t_end=t_end, chunk=chunk, refine_tol=refine_tol,
+                    coarsen_tol=coarsen_tol, observer=observer)
     title = @sprintf("Travelling super-Gaussian pulse, n = %d, σ = %.3g — \
                       refinement tracks it\nworst L∞ = %.3g over the run, \
                       %d blocks at maxlevel %d",
                      n, σ, r.worst, r.nblocks, r.maxlevel)
-    return snaps, pulse_exact(D, L, x0, σ, snaps[end].t; n=n), L, title
+    return (snaps=snaps, exactf=pulse_exact(D, L, x0, σ, snaps[end].t; n=n),
+            L=L, title=title,
+            tols=(refine_tol=refine_tol, coarsen_tol=coarsen_tol),
+            steering=true)
 end
 
 function main(args)
@@ -248,8 +291,9 @@ function main(args)
                                                     ops_order=ops_order)))
         (case == "both" || case == name) || continue
         @info "running the $name case"
-        snaps, exactf, L, title = build()
-        fig = makefigure(snaps, exactf, L, title)
+        c = build()
+        fig = makefigure(c.snaps, c.exactf, c.L, c.title; tols=c.tols,
+                         steering=c.steering)
         path = joinpath(outdir, "$(name)_$(dim)d.png")
         save(path, fig)
         inline && display(fig)

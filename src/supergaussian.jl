@@ -66,6 +66,16 @@ so each chunk is a fresh `solve`: stop, rebuild the schedule and the
 state vector, restart — the pattern `CODE.md` prescribes for anything
 beyond a one-step method.
 
+Refinement is driven by the per-cell criterion in `refinement.jl`: where
+the mesh fails to resolve the data, not where the amplitude is large. The
+depth is therefore an *output* of the run — at the default tolerances the
+indicator stops at level 2 on its own, with `maxlevel_cap` never binding — and
+the same [`refine_mark`](@ref) serves both the initial adaptation and the
+evolution so the two cannot drift apart.
+
+The buffer width is derived from the pulse's motion by
+[`refinement_buffer`](@ref); pass `buffer` explicitly to override it.
+
 Pass `observer` to watch the run rather than only its outcome: it is
 called as `observer(fs, t, u)` once per chunk (and once at `t = 0`),
 after the data has been scattered into `fs` and before the regrid that
@@ -73,23 +83,36 @@ would invalidate it. This is what the viewer in `bin/` uses.
 """
 function track_pulse(::Val{D}; N=8, G=2, roots=8, L=1.0, σ=0.05, x0=0.25, n=1,
                      ops=Operators(prolongation=4, restriction=4),
-                     t_end=0.5, chunk=0.05, cfl=0.25, maxlevel_wanted=2,
-                     threshold=0.05, observer=nothing) where {D}
+                     t_end=0.5, chunk=0.05, cfl=0.25, maxlevel_cap=2,
+                     refine_tol=0.30, coarsen_tol=0.075, ε=0.01,
+                     buffer=nothing, observer=nothing) where {D}
     forest = Forest(ntuple(_ -> roots, D); N=N, G=G, periodic=ntuple(_ -> true, D),
                     extents=ntuple(_ -> (0.0, L), D))
     fs = FieldSet(forest, 2)
 
-    # Refine where the pulse actually is, judged from the current data.
-    function flag(b, k)
-        peak = maximum(abs, interiorview(fs, b, 1))
-        want = peak > threshold ? maxlevel_wanted : 0
-        return level(k) < want ? Refine : level(k) > want ? Coarsen : Keep
-    end
+    # The wave speed is 1, so the pulse travels exactly `chunk` between one
+    # regrid and the next. Deriving the margin from that is the
+    # application's job -- it is physics the mesh cannot know. An explicit
+    # `buffer` overrides the derivation, which exists so that a test can
+    # measure what a deliberately too-narrow margin costs.
+    buffer = buffer === nothing ? refinement_buffer(forest, maxlevel_cap, chunk) :
+             buffer
 
     fill_by_coordinates!(pulse_exact(D, L, x0, σ, 0.0; n=n), fs)
+
+    # The indicator's noise floor is referred to a global amplitude, and the
+    # wave equation conserves that, so measuring it once from the initial
+    # data serves the whole run. It also has to be fixed for the
+    # adaptation cycle below, whose flag callback has no pass boundary to
+    # refresh it at.
+    scales = field_scales(fs)
+
+    flag(b, k) = refine_mark(fs, b, k; scales=scales, refine_tol=refine_tol,
+                             coarsen_tol=coarsen_tol, maxlevel_cap=maxlevel_cap, ε=ε)
+
     schedule, _, _ = adapt_to_initial_data!(fs, ops;
                                             initial=pulse_exact(D, L, x0, σ, 0.0; n=n),
-                                            flag=flag, maxpasses=8)
+                                            flag=flag, buffer=buffer, maxpasses=8)
 
     if observer !== nothing
         u0 = statevector(fs)
@@ -132,9 +155,11 @@ function track_pulse(::Val{D}; N=8, G=2, roots=8, L=1.0, σ=0.05, x0=0.25, n=1,
         end
         push!(refined_fraction, total > 0 ? inside / total : 0.0)
 
+        # The indicator reads a 3-point stencil, so it needs ghosts; and
+        # `regrid!` fills them only afterwards, for the transfer.
         fill_ghosts!(fs, schedule)
         flags = flag_blocks(flag, forest)
-        if regrid!(forest, fs, schedule; flags=flags)
+        if regrid!(forest, fs, schedule; flags=flags, buffer=buffer)
             schedule = GhostSchedule(forest, ops)
         end
     end
