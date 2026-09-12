@@ -48,12 +48,18 @@ jobs:
       - uses: julia-actions/cache@v3
       - name: Instantiate the viewer environment
         run: julia --project=bin -e 'using Pkg; Pkg.instantiate()'
-      - name: Render both cases
+      - name: Render the 1D cases
         run: julia --project=bin bin/visualize.jl --no-display
-      - name: Check that both figures were written
+      - name: Render the 2D blast wave, tracking and with the scale frozen
+        run: |
+          julia --project=bin bin/visualize2d.jl --no-display
+          julia --project=bin bin/visualize2d.jl --frozen-scales --no-display
+      - name: Check that every figure was written
         run: |
           test -s bin/output/sine_1d.png
           test -s bin/output/pulse_1d.png
+          test -s bin/output/blast_2d.png
+          test -s bin/output/blast_2d_frozen.png
       - uses: actions/upload-artifact@v4
         with:
           name: figures

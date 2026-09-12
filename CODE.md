@@ -20,9 +20,12 @@ application.
 
 - **No mesh machinery.** If something is about trees, ghosts, or
   interpolation, it belongs in TreeAMR.
-- **One equation, two initial conditions.** Not a framework; there is no
-  abstraction over equations or initial data, because with two of each an
-  abstraction would only hide what the example is meant to show.
+- **One equation, three initial conditions.** Not a framework; there is no
+  abstraction over equations or initial data, because with three of the
+  latter an abstraction would only hide what the example is meant to show.
+  The third one earns its place by breaking something: it is the only case
+  whose feature *loses amplitude*, and that is what puts the refinement
+  criterion's noise floor under strain rather than merely exercising it.
 - **Non-conservative at coarse-fine interfaces.** The wave equation does
   not need flux matching, and TreeAMR defers it to its M8 anyway.
 
@@ -69,8 +72,11 @@ type-unstable by design; it is called once per chunk, never per step.
 
 ## Initial conditions
 
-The two are not variations on a theme. Each measures something the other
-cannot.
+The three are not variations on a theme. Each measures something the
+others cannot: the sine mode has an exact answer everywhere and so fixes
+the *order*; the pulse is localized and *moves*, so the refined region has
+to follow it; the blast wave *spreads*, so its amplitude falls and its
+refined region grows.
 
 ### Standing sine mode ([`src/sinewave.jl`](src/sinewave.jl))
 
@@ -130,6 +136,81 @@ O(40) no matter how correct the code is. Raising `n` means raising the
 resolution of every pulse run to match; the flat-top shape is available,
 but it is not free.
 
+### Radial blast wave ([`src/blast.jl`](src/blast.jl))
+
+    u = G(r),  ∂ₜu = 0,   r = |x - x₀|  (wrapped)
+
+A super-Gaussian peak released at rest in the middle of the box, which
+spreads as a ring at the wave speed. This is the Sedov blast-wave test in
+the only form this package can run: there is no shock and no Riemann
+solver, it is still the wave equation, but the mesh problem is the one a
+Sedov test poses — a front expanding at a known speed, *losing amplitude
+to geometric spreading*, with the refined region tracking it outward and
+the interior coarsening back behind it. It is the first case here in which
+coarsening does any work at all.
+
+Released at rest is forced, not chosen. A purely outgoing radial wave is
+`P(r-t)/r`, singular at the origin unless `P(0) = 0`, so a peak *at the
+centre* cannot be outgoing: it splits, the ingoing half passes through the
+origin at once, and a single expanding ring is what survives.
+
+#### Why 2D, when 3D is where the closed form lives
+
+In three dimensions Huygens' principle holds, the ring is a clean shell
+with exactly nothing behind it, and the radial solution is elementary:
+
+    u(r,t) = [h(r+t) + h(r-t)] / 2r,   h(s) = s·G(s)
+
+Measured against the solver at `σ = 0.07`, that gives L∞ `1.43 / 0.76 /
+0.33` at `h = 1/24, 1/32, 1/48` — second order, so the formula is right.
+
+In two dimensions there is no Huygens principle. A wake trails the ring
+and never clears — measured `u(r = 0.05, t = 0.3) = -0.0152` in 2D against
+`0.0` to roundoff in 3D — and there is no elementary closed form.
+
+3D is nonetheless the wrong choice, on cost. An adaptive *shell* is
+minutes, not seconds: `track_pulse(Val(3))` already costs 20 s for
+`t ≤ 0.06` at 2752 blocks, and a shell whose area grows is far worse. That
+is outside what the CI figure job can render, and a 3D viewer would have
+to slice to a plane anyway. The 2D adaptive run costs 1.4 s to `t = 0.4`.
+So the 3D formula is recorded here and not implemented.
+
+#### The exact solution is a quadrature
+
+In 2D the radially symmetric solution is the inverse Hankel transform of
+the initial profile, propagated mode by mode:
+
+    u(r,t)  =  ∫₀^∞ f̂(k) J₀(kr) cos(kt) k dk
+    ∂ₜu(r,t) = -∫₀^∞ f̂(k) J₀(kr) sin(kt) k² dk
+
+For the ordinary Gaussian `f̂(k) = (σ²/2)·exp(-k²σ²/4)`, which is why an
+exact solution exists at all — and why it exists **only at `n = 1`**.
+[`blast_exact`](src/blast.jl) throws for any other order rather than
+returning a silently wrong answer; the case itself still runs at higher
+`n`, it just has to be measured against a uniform reference mesh instead.
+
+Two things make the radial table finite and correct. It is **zero beyond
+`t + 6σ`** — the solution has no support ahead of the front and a
+Gaussian's tail at six standard deviations is `e^(-36)`. And the closure
+**sums over periodic images**, which `pulse_exact` never has to do: a
+plane pulse of width `σ ≪ L` is always far from its own images, but a ring
+reaches the corners of the box, where the nearest image lies exactly as
+far away as the source. The number of image rings is derived from
+`t + 6σ`, so raising `t_end` cannot quietly invalidate it.
+
+`J₀(kr)` does not depend on `t`, so [`blast_reference`](src/blast.jl)
+tabulates it once on the `(r, k)` grid and every later time is a
+contraction against it. That is not a micro-optimization: evaluating the
+transform afresh costs 0.65 s, and a run measuring its error once per
+chunk wants twenty of them, so caching turns 13 s into 1 at a cost of
+32 MB.
+
+Against a uniform mesh the whole construction reproduces second order —
+L2 rate **1.99**, L∞ rate **1.95**, tabulated under Measured results. The
+quadrature's own error is ~9e-7, four orders below the finest
+discretization error, so what the comparison measures is the scheme and
+not the table.
+
 ## Operator order: the constraint inherited from TreeAMR
 
 TreeAMR's interface-order rule is why every driver here takes `ops` and
@@ -181,6 +262,33 @@ the fix the pulse's tail blocks score τ = 0.0000 against the feature's 0.79.
 Since the wave equation conserves amplitude, the scale is measured once from the
 initial data and reused; a problem that grows or decays by orders of magnitude
 would have to refresh it.
+
+#### The blast wave is that problem, and it fails two ways
+
+The radial blast wave is the case that note anticipated, so the hypothetical is
+now a measurement. Geometric spreading takes the peak from 1.0 to 0.109 over the
+run. Measured in 2D at `σ = 0.05`, `roots = 8`, `N = 8`, cap 2:
+
+| `field_scales` policy | max τ at t=0.4 | blocks at t=0.4 | outcome |
+|---|---|---|---|
+| refreshed at every regrid | 0.429 | 784 | tracks the ring; refined area grows with it |
+| frozen after one chunk | 0.208 | 472 | τ halves as the amplitude decays 6.5×, falls below `refine_tol`, and the ring stops recruiting blocks ahead of itself |
+| frozen at `t = 0`, as `track_pulse` does | 1.000 | 1024 = **the whole domain at level 2** | total failure |
+
+The last row is a **second, sharper trap and not the decay effect**. This initial
+data has `∂ₜu ≡ 0`, so `field_scales` returns `[0.952, 0.0]`: the variable-2 scale
+is *exactly* zero. At `t = 0` that is harmless by accident — the numerator
+vanishes with it and `lohner` returns 0, which is why the initial adaptation is
+sane at 136 blocks — but one chunk later `∂ₜu` is numerical dust in the far field
+measured against a floor of zero, which is precisely the scale-free pathology
+above. τ pins to 1.0 everywhere.
+
+Both are fixed by the same line: [`track_blast`](src/blast.jl) recomputes
+`field_scales` at every regrid. It keeps `refresh_scales=false` so that the table
+is a test (`test/blast_tests.jl`) and a figure (`--frozen-scales`) rather than a
+remark. Note that τ is a *ratio*, so the indicator is otherwise amplitude-blind
+by construction — which is exactly why a resolution criterion survives geometric
+spreading at all, where the old `|u| > threshold` criterion could not have.
 
 ### Two thresholds, meaning two different things
 
@@ -250,6 +358,12 @@ really a statement about cadence — the feature may not cross a whole finest-le
 block between regrids — and the derivation throws naming that rather than letting
 the caller meet an opaque rejection inside `regrid!`.
 
+Written out, the constraint is `chunk ≤ (N-1)·spacing(forest, maxlevel_cap)`, and
+it tightens by a factor of two with every level. At `N = 8` and `chunk = 0.02` a
+cap of 2 needs 7 cells and fits; a cap of 3 would need 12 and a cap of 4 would
+need 14, so a deeper hierarchy is not a free choice — it has to be paid for with
+a shorter `chunk`. Both of those are throws today, not surprises.
+
 ## Regridding: restart per chunk
 
 Regridding changes both the length and the meaning of the state vector.
@@ -259,10 +373,6 @@ and dense output become invalid the moment entries are reinterpreted —
 schedule and the state vector, and starts a fresh `solve`. This is the
 pattern TreeAMR prescribes for anything beyond a one-step method, and at
 `chunk = 0.02` the restart cost is not measurable against the step cost.
-
-The refinement criterion is deliberately crude — refine a block if its
-peak `|u|` exceeds a threshold — because the point is to test whether the
-*mesh* follows a moving feature, not to design a good error estimator.
 
 ## Watching a run: the `observer` keyword
 
@@ -286,18 +396,40 @@ already three near-identical time-stepping loops in `src/`; a fourth in
 | `src/refinement.jl` | the per-cell refinement indicator and its reduction to block marks |
 | `src/sinewave.jl` | the standing mode and its convergence driver |
 | `src/supergaussian.jl` | the travelling pulse, its AMR driver, and the uniform reference |
+| `src/blast.jl` | the radial blast wave, its Hankel-quadrature exact solution, its AMR driver, and the uniform reference |
 | `test/sinewave_tests.jl` | convergence order, the interface-order rule, 3D smoke test, energy drift |
 | `test/refinement_tests.jl` | claims about the indicator itself |
 | `test/supergaussian_tests.jl` | a moving refined region tracks the pulse |
-| `bin/visualize.jl` | CairoMakie viewer (own environment; see `bin/Project.toml`) |
+| `test/blast_tests.jl` | the exact ring, 2nd-order convergence to it, a growing refined region, and what a frozen amplitude scale costs |
+| `bin/visualize.jl` | CairoMakie viewer for the 1D cases (own environment; see `bin/Project.toml`) |
+| `bin/visualize2d.jl` | CairoMakie viewer for the blast wave — a different figure, not a flag on the other one |
 | `.github/workflows/CI.yml` | tests on a Julia matrix, plus a job that renders the figures |
 
-The viewer draws three panels per case — the solution, the pointwise error
-in `u`, and the volume-weighted L2/L∞ norms over the whole state against
-time — with one line per block colored by refinement level. `--ops=2`
-reruns with order-2 operators, which is the quickest way to see the
-interface-order rule rather than read about it. Figures are written as PNGs
-and, when stdout is a terminal, drawn inline via SixelTerm.
+`bin/visualize.jl` draws four panels per 1D case — the solution, the
+pointwise error in `u`, the indicator τ, and the volume-weighted L2/L∞
+norms over the whole state against time — with one line per block colored
+by refinement level. `--ops=2` reruns with order-2 operators, which is the
+quickest way to see the interface-order rule rather than read about it.
+
+`bin/visualize2d.jl` is a separate script and not a `--dim=2` flag,
+because nothing transfers: a line per block against `x` is not a worse
+picture in 2D, it is no picture. It draws a filmstrip of `u` at four
+times with the block boundaries colored by level, then `u` against radius
+for every cell, then the block count and max τ against time. The radial
+panel is the standard Sedov diagnostic, and sharper than it looks: the
+exact solution depends on `r` alone, so every cell of a perfect solution
+lands on one curve and vertical spread is the error the Cartesian mesh
+introduces by not being radial. It is readable only inside `r = L/2`,
+where the ring is far enough from its own periodic images that the *exact*
+solution is radial too; the figure draws that rule. `--frozen-scales`
+renders the failure mode from the refinement section above, and that pair
+of figures is the argument for refreshing the scale.
+
+Figures are written as PNGs and, when stdout is a terminal, drawn inline
+via SixelTerm. PNG is not an idle default for the 2D viewer: CairoMakie's
+fast image path is what lets 820 abutting per-block heatmaps meet without
+hairline seams, and vector output disables it, degrading each block into
+one polygon per cell.
 
 The tests are ported from TreeAMR's own `test/wave_tests.jl`, minus its
 "RHS does not mutate the state vector" testset — that one guards TreeAMR's
@@ -305,7 +437,7 @@ The tests are ported from TreeAMR's own `test/wave_tests.jl`, minus its
 equation, and belongs upstream where it already lives.
 
 CI runs the test suite on Julia 1.11 and release, on Linux and macOS, and
-separately renders both figures and keeps them as artifacts. The second job
+separately renders all three figures and keeps them as artifacts. The second job
 exists because `bin/` carries its own environment and therefore its own copy
 of the TreeAMR dependency: during development that let the viewer keep
 building against an older TreeAMR than the tests, until it failed on an API
@@ -358,6 +490,42 @@ than as a test that merely still passes.
   the error is clearly better than at `buffer = 0`, not worse. Recorded as a
   contradiction rather than smoothed over — it may be geometry-specific, and
   TreeAMR measured it on a different setup.
+- Blast wave, `σ = 0.08`, `roots = 8`, `t_end = 0.4`. Uniform meshes against
+  the Hankel-quadrature exact solution:
+
+  | N | h | L2 | L∞ | cells |
+  |---|---|---|---|---|
+  | 8 | 1/64 | 0.0772 | 0.3082 | 4096 |
+  | 16 | 1/128 | 0.0196 | 0.0811 | 16384 |
+  | 32 | 1/256 | 0.0049 | 0.0205 | 65536 |
+
+  L2 rate 1.99, L∞ rate 1.95 — the quadrature is right to well past what the
+  scheme can see.
+- Blast wave, adaptive (`N = 8`, cap 2) against those: L∞ 0.0297 at 52480
+  cells, so **10× better than uniform-coarse and 1.45× worse than
+  uniform-fine at 80% of its cells**. That is a weaker claim than the
+  pulse's `rtol = 0.1` match, and it is the honest one: 9% of the ring's
+  cells sit on level-1 blocks whose τ fell below `refine_tol`, which is the
+  criterion trading accuracy for cells rather than failing to. The pulse
+  matched uniform-fine only because its refined region was, relatively, far
+  more generous.
+- Blast wave, mesh growth: 136 blocks after the initial adaptation to 820 at
+  `t = 0.4`, a factor of 6.0, with the depth an output — at `σ = 0.08` the
+  indicator's τ falls to 0.222 at level 2, below `refine_tol = 0.30`, so it
+  stops there and `maxlevel_cap` never binds. Max τ on uniform meshes, the
+  calibration that fixes σ:
+
+  | σ | h=1/64 | h=1/128 | h=1/256 | h=1/512 |
+  |---|---|---|---|---|
+  | 0.05 | 0.909 | 0.745 | 0.424 | 0.157 |
+  | 0.08 | 0.812 | 0.529 | **0.222** | 0.067 |
+
+  At `σ = 0.05` the indicator wants level 3 and the cap binds instead, which
+  is why the blast uses the pulse's σ and not a smaller one. Any
+  `refine_tol` in `[0.20, 0.30]` yields the identical mesh.
+- Blast wave with the amplitude scale frozen at `t = 0`: 1024 blocks — the
+  whole domain at level 2 — against 208 for the refreshed run at `t = 0.1`.
+  See the refinement section for why it fails two separate ways.
 - Sine mode at 0.9 periods, `N = 16`, `roots = 4`, two levels: final L∞
   0.0063 with order-4 operators against 0.122 with order-2 — a factor of
   19 for a change that touches only the ghost cells. This is the pair the

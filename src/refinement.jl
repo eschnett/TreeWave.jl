@@ -72,6 +72,12 @@ flagging pass and not once per block.
     data and reused for the run, which is what [`track_pulse`](@ref)
     does. A problem whose solution grows or decays by orders of magnitude
     needs it refreshed, or the floor drifts out of proportion to the data.
+
+    [`track_blast`](@ref) is that problem and refreshes at every regrid.
+    Geometric spreading takes its peak down by an order of magnitude, and
+    its `∂ₜu` starts at *exactly* zero, so a scale frozen at `t = 0`
+    leaves variable 2 with no floor at all and the criterion refines the
+    whole domain. Measured; see `CODE.md`.
 """
 field_scales(fs::FieldSet; vars=1:fs.nvars) =
     [maximum(b -> maximum(abs, interiorview(fs, b, v)), 1:nblocks(fs)) for v in vars]
