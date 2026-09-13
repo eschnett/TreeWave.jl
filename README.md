@@ -23,6 +23,13 @@ julia --project=. -e 'using Pkg; Pkg.test()'   # the acceptance tests
 julia --project=bin bin/visualize.jl           # solution, error, error norms
 julia --project=bin bin/visualize.jl --type=f32   # the same run, single precision
 julia --project=bin bin/visualize2d.jl         # the blast wave and its mesh
+julia -t auto --project=. bin/benchmark.jl     # where the time goes
 ```
+
+It runs threaded with nothing to configure: start Julia with `-t` and
+every loop over blocks — TreeAMR's and this package's — is parallel, and
+the answer is bit-identical whatever the thread count. What that does
+*not* buy is the whole step, because the integrator's stage arithmetic
+stays serial; the measured numbers are in [CODE.md](CODE.md).
 
 See [CODE.md](CODE.md) for the design and the measured results.

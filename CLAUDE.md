@@ -25,8 +25,29 @@ dependency):
 julia --project=bin bin/visualize.jl
 ```
 
-The full suite takes about 20 seconds. The slow parts are the two
-convergence sweeps and the 3D smoke test; the pulse test is about 5 s.
+`Pkg.test` does not inherit `-t`, so the threaded paths in the suite
+itself need it passed explicitly (the thread-independence test spawns its
+own subprocess either way):
+
+```bash
+julia --project=. -e 'using Pkg; Pkg.test(; julia_args = ["--threads=4"])'
+```
+
+Thread scaling (`bin/benchmark.jl`, swept by `bin/benchmark.sbatch`,
+which is both a batch job and an ordinary shell script). Note the
+`--project=.`: this is the one script in `bin/` that does *not* use the
+viewer environment.
+
+```bash
+TREEWAVE_THREADS="1 2 4 8" TREEWAVE_ARGS="--dim=2 --n=64 --roots=16" \
+    bin/benchmark.sbatch
+```
+
+The full suite takes about 60 seconds, of which the thread-independence
+test is 10 -- it runs `test/thread_workload.jl` in a subprocess, which
+pays Julia's startup and `OrdinaryDiffEq`'s load time again. The other
+slow parts are the type tests, the two convergence sweeps and the 3D
+smoke test; the pulse test is about 5 s.
 
 ## Things that have bitten before
 
@@ -86,6 +107,35 @@ convergence sweeps and the 3D smoke test; the pulse test is about 5 s.
   to the discretization error the sweeps measure. `CODE.md` records this;
   `test/type_tests.jl` asserts the mesh the criterion chooses instead,
   which *is* precision-insensitive.
+- **A parallel loop here must be bit-identical to the serial one.** That is
+  TreeAMR's M5 invariant and the whole application inherits it: write one
+  slot per block and combine the partials in a fixed order, never
+  accumulate into shared state. `blast_radial_table` is the instructive
+  case — the mode loop *cannot* be split, because every `k` contributes to
+  every `r`; partitioning the radii instead keeps each sum in its original
+  order. `test/threading_tests.jl` fails if this is broken, and nothing
+  else in the suite would.
+- **Never thread anything a TreeAMR callback can reach.** `flag_blocks`
+  and `fill_by_coordinates!` call their callbacks concurrently, so a
+  `Threads.@threads` inside `cell_indicator`, `refine_mark` or an
+  initial-data closure would nest one parallel loop inside another.
+  `field_scales` is safe only because it is evaluated at `refine_flags`'
+  own call site, outside the flagging pass; keep it that way.
+- **`julia -t N` asks for `N + 1` threads.** The interactive thread is
+  added on top of the count given, so with `JULIA_EXCLUSIVE=1` pinning one
+  thread per core, `-t 64` on a 64-core node dies with "Too many threads
+  requested for JULIA_EXCLUSIVE option" -- at the *end* of a sweep that
+  had already run for eight minutes. `-t N,0` asks for exactly `N` on
+  1.13 and is rejected by 1.11 ("n and m must be integers >= 1"), which
+  is the cluster's version, so `bin/benchmark.sbatch` does not pin at
+  all rather than pin every point of the sweep but the last.
+- **Julia's precompilation cache is per CPU target.** Precompiling on a
+  cluster's login node does not help its compute nodes if the two are
+  different machines -- on Symmetry the login node is Intel and the AMD
+  nodes are not, so a batch job precompiles everything again on its own
+  wall clock. Precompile in an interactive `srun` on the same node type
+  before submitting, and do not submit two jobs that would precompile the
+  same depot at once.
 
 ## Conventions
 
@@ -114,6 +164,10 @@ Match TreeAMR's style, since the two are read together:
   not touch it. After a TreeAMR change, update both or the viewer fails with a
   `MethodError` on an API the tests are already using.
 - `bin/output/` is gitignored; the viewer writes PNGs there.
+- **`bin/benchmark.jl` is the one script in `bin/` that runs against the
+  root project**, not `bin/Project.toml`: it needs no CairoMakie, and
+  asking a compute node to build Cairo in order to time a Laplacian would
+  be absurd. It is therefore not part of the viewer CI job.
 - `CODE.md` is committed. `README.md` is the short public blurb.
 - `main` is committed and published: `origin` is
   `git@github.com:eschnett/TreeWave.jl.git`, and `main` tracks it. Work on a

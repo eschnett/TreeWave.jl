@@ -87,6 +87,13 @@ the host, so nothing past that conversion sees a `Float64`. The cost is that the
 reference is capped at `Float64` accuracy; its ~9e-7 quadrature error is four
 orders below the finest discretization error measured against it, so nothing
 this package can resolve notices.
+
+The table is filled one `k` column per thread. Four million independent
+`besselj0` calls with nothing to combine is the most favourable shape a
+parallel loop can have, and serially it is the largest single block of
+unbroken serial work in the package — of the order of a second against a
+whole adaptive run of a few seconds. Column-major, so each task writes
+contiguous pages; measured at 39× on 64 cores, see `CODE.md`.
 """
 function blast_reference(L, x₀, σ; rmax, nr=2001, nk=2000)
     L, σ, rmax = tofloat64(L), tofloat64(σ), tofloat64(rmax)
@@ -95,7 +102,13 @@ function blast_reference(L, x₀, σ; rmax, nr=2001, nk=2000)
     ks = [(j - 0.5) * dk for j in 1:nk]
     ws = [(σ^2 / 2) * exp(-(k * σ)^2 / 4) * k * dk for k in ks]
     rs = range(0.0, rmax; length=nr)
-    J = [besselj0(k * r) for r in rs, k in ks]
+    J = Matrix{Float64}(undef, nr, nk)
+    Threads.@threads for j in 1:nk
+        k = ks[j]
+        @inbounds for i in 1:nr
+            J[i, j] = besselj0(k * rs[i])
+        end
+    end
     return (L=L, x₀=x₀, σ=σ, rs=rs, dr=step(rs), rmax=rmax, ks=ks, ws=ws, J=J)
 end
 
@@ -105,19 +118,36 @@ end
 The radial profiles of `u` and `∂ₜu` at time `t`, on the reference's own
 radius grid. One pass over the cached `J₀(kr)`; both profiles are
 accumulated together because they share every entry of it.
+
+Threaded over *radii*, not over modes. The mode loop cannot be split:
+every `k` contributes to every `r`, so `us` and `vs` would be shared
+accumulators and the sum's order — and therefore its last bits — would
+follow the thread count. Giving each task a contiguous range of radii
+instead leaves each `us[i]` summed over all modes in the same order it
+always was, so the result is bit-identical to the serial one for any
+partition at all, and the `@simd` inner loop survives intact.
+
+The one thing this does not fix is placement: `J` is first touched by
+column in [`blast_reference`](@ref) and read by row here, so on a NUMA
+node no first-touch pattern serves both passes. That is the application's
+own instance of the effect TreeAMR measured in M5, and the reason to run
+under `numactl --interleave=all`.
 """
 function blast_radial_table(ref, t)
     nr, nk = size(ref.J)
     us = zeros(Float64, nr)
     vs = zeros(Float64, nr)
-    for j in 1:nk
-        w = ref.ws[j]
-        k = ref.ks[j]
-        wc, wsn = w * cos(k * t), w * sin(k * t) * k
-        @inbounds @simd for i in 1:nr
-            Jij = ref.J[i, j]
-            us[i] += Jij * wc
-            vs[i] -= Jij * wsn
+    rows = collect(Iterators.partition(1:nr, cld(nr, Threads.nthreads())))
+    Threads.@threads for c in eachindex(rows)
+        for j in 1:nk
+            w = ref.ws[j]
+            k = ref.ks[j]
+            wc, wsn = w * cos(k * t), w * sin(k * t) * k
+            @inbounds @simd for i in rows[c]
+                Jij = ref.J[i, j]
+                us[i] += Jij * wc
+                vs[i] -= Jij * wsn
+            end
         end
     end
     return (us=us, vs=vs)
@@ -229,17 +259,21 @@ run's own type — see the rule under "Precision" in `CODE.md`.
 function blast_coverage(fs::FieldSet)
     peak = maximum(b -> maximum(abs, interiorview(fs, b, 1)), 1:nblocks(fs))
     finest = maximum(b -> level(blockkey(fs, b)), 1:nblocks(fs))
-    hot = 0
-    fine = 0
-    for b in 1:nblocks(fs)
+    # Counts per block, summed afterwards: integers, so the total is exact
+    # under any order, and the threshold pass cannot start until the peak
+    # reduction above has finished.
+    hot = zeros(Int, nblocks(fs))
+    fine = zeros(Int, nblocks(fs))
+    Threads.@threads for b in 1:nblocks(fs)
         isfine = level(blockkey(fs, b)) == finest
         for value in interiorview(fs, b, 1)
             abs(value) > peak / 2 || continue
-            hot += 1
-            isfine && (fine += 1)
+            hot[b] += 1
+            isfine && (fine[b] += 1)
         end
     end
-    return hot == 0 ? 1.0 : fine / hot
+    total = sum(hot)
+    return total == 0 ? 1.0 : sum(fine) / total
 end
 
 """

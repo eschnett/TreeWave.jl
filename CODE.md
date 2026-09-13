@@ -494,6 +494,158 @@ schedule and the state vector, and starts a fresh `solve`. This is the
 pattern TreeAMR prescribes for anything beyond a one-step method, and at
 `chunk = 0.02` the restart cost is not measurable against the step cost.
 
+## Multi-threading
+
+There is no switch. Start Julia with `-t` and the whole application is
+parallel, because TreeAMR's M5 threads both halves of what it owns: every
+per-cell kernel (KernelAbstractions' CPU backend spreads a launch over
+`Threads.nthreads()`) and every host-side pass over blocks. Two of those
+passes call code that lives *here* — the initial-data callback given to
+`fill_by_coordinates!`, which upstream turned into a kernel, and the flag
+function given to `flag_blocks`, which is where the Löhner sweep of
+[`cell_indicator`](src/refinement.jl) runs. Both were parallelized by
+updating the dependency and changing nothing.
+
+That also made the package ready for TreeAMR's M6 without a line
+changing: its initial data already runs inside a kernel that reaches the
+geometry through per-block `block_origins`/`block_spacings` arrays rather
+than through the tree, which is the shape a device demands.
+
+### The callbacks are called concurrently, so they must be pure
+
+`pulse_exact`, `wave_exact`, `blast_initial`, `blast_exact` and
+`refine_mark` are now invoked from inside parallel loops. They are pure
+functions of their arguments and must stay that way — a closure that
+memoized, counted calls, or wrote into a captured buffer would be a data
+race that no test in this suite would report as one.
+
+The subtle case is the one that looks safe. `field_scales` is itself a
+threaded reduction, so it must not be evaluated *inside* the flagging
+pass, or one parallel loop would nest in another. It is not:
+[`refine_flags`](src/refinement.jl) evaluates that keyword at its own call
+site, and the drivers hoist it further still, to once per regrid. That is
+load-bearing rather than incidental.
+
+### What was left for the application to thread
+
+Four loops here were reached by none of the above, and they were measured
+before they were touched — 0.98×, 1.01× and 0.98× at eight threads for
+the three the benchmark already covered, which is the flat line a serial
+loop should give and the check that the benchmark reads what it claims
+to. Each is now written the way upstream writes its own: one slot per
+block (or column, or radius), combined afterwards in a fixed order, never
+an accumulator shared between tasks.
+
+**The Hankel contraction is the instructive one.** Its natural outer loop
+is over modes, and that loop cannot be split: every `k` contributes to
+every `r`, so `us` and `vs` would be shared and the summation order — and
+therefore the last bits of the answer — would follow the thread count.
+Partitioning the *radii* instead leaves each `us[i]` summed over all modes
+in the order it always was, so the result is bit-identical for any
+partition at all. It is also the loop that barely speeds up: it streams
+the whole 32 MB `J₀(kr)` table and is bandwidth-bound, and the table is
+first-touched by column in `blast_reference` and read by row here, so no
+page placement serves both passes. It is threaded anyway — the partition
+that keeps it exact costs three lines.
+
+### Bit-identical, not merely to roundoff
+
+TreeAMR's M5 asks only that threaded results match serial to roundoff, and
+delivers exact equality instead. An application can give that property
+away in one line, so this package holds itself to the same standard and
+tests it: [`test/thread_workload.jl`](test/thread_workload.jl) runs
+`track_pulse` and `track_blast` — adaptation, evolution, flagging,
+regridding, the quadrature and the reductions — and prints a digest of the
+state vector at every chunk through the `observer` keyword, while
+[`test/threading_tests.jl`](test/threading_tests.jl) compares a subprocess
+at a different thread count against the run in hand, character for
+character.
+
+Two decisions in that test are worth keeping. The comparison is between
+two *live* runs and never against a committed digest: bit-identity holds
+across thread counts, not across TreeAMR versions — upstream's M5 changed
+`volume_weighted_norm` from a running total to a sum of per-block
+partials, which is a different summation order and may move the last bits
+of any recorded L2 number. And the workload uses only `Base` and the
+package (`hash`, `repr`), so it runs from the root environment as well as
+from `test/`, which is what makes a mismatch bisectable.
+
+### What it buys, and what caps it
+
+Measured on one exclusive node of Symmetry's `amddebugq` — 64-core AMD
+EPYC, 8 NUMA domains, no SMT — on a two-level 2D mesh of **1792 blocks of
+128², 29.4M cells**, a 476 MB working array and a 470 MB state vector.
+Speedups against one thread, with the default first-touch page placement,
+and at 64 threads also with the pages interleaved
+(`numactl --interleave=all`). Both columns come from the same node in the
+same job, because two nominally identical nodes measured 20% apart:
+
+| phase | 8t | 16t | 32t | 64t | 64t interleaved |
+|---|---|---|---|---|---|
+| RK4 step (`solve`) | 3.07 | 3.68 | 3.42 | **3.57** | 3.24 |
+| RHS evaluation | 7.28 | 14.25 | 15.25 | **17.7** | 12.1 |
+| stage broadcast | 1.00 | 1.00 | 1.01 | **0.92** | 1.01 |
+| initial data | 7.84 | 15.67 | 30.94 | **37.3** | 36.4 |
+| refinement flags | 8.00 | 16.12 | 32.20 | **33.9** | 28.0 |
+| amplitude scales | 7.35 | 14.28 | 4.63 | **5.7** | 5.2 |
+| exact ring (`blast_exact`) | 7.75 | 15.65 | 31.43 | **46.3** | 44.2 |
+| Hankel table | 7.46 | 14.97 | 29.18 | **39.0** | 45.9 |
+| Hankel contraction | 1.60 | 1.82 | 1.13 | **2.1** | 2.2 |
+| coverage reduction | 1.86 | 2.03 | 1.94 | **1.8** | 1.8 |
+
+**The mesh scales and the step does not, and that is the result.** The
+right-hand side — scatter, ghost fill and the Laplacian kernel, which is
+all this application asks the mesh for — reaches 17.7×. A whole RK4 step
+reaches 3.6× and stops there, by 16 threads. The arithmetic is not
+mysterious: at one thread, four RHS evaluations are 2.34 s of a 3.05 s
+step, the four stage broadcasts are 0.29 s, and the remaining 0.43 s is
+the integrator's own copying; at 64 threads the same step is 0.855 s, of
+which the RHS is 0.13 and the other 0.72 — 84% — is serial.
+`OrdinaryDiffEq` does its stage arithmetic as ordinary broadcasts over the
+state vector, and the benchmark times one of them directly
+(`stage_broadcast`, flat at 1.0× across the whole sweep) precisely so the
+ceiling is a measured number and not an inference.
+
+The obvious fix is one keyword — `RK4(thread = True())`, which sends those
+same broadcasts through Polyester — and it is **worse**: measured at eight
+threads, 0.030 s per step becomes 0.064, reproducibly and in both
+orderings. Polyester spins up a second thread pool alongside the tasks
+KernelAbstractions is already using, and the two oversubscribe the cores.
+It also costs two new direct dependencies (`Static` for the keyword's
+value, `Polyester` for the extension that implements it). So the honest
+statement is not "we could turn it on" but "the stage updates have to join
+the pool that is already running" — which means a time integrator written
+as kernels, listed under Possible extensions rather than done.
+
+**Interleaving the pages did nothing here, and upstream measured 2–6×.**
+That is a contradiction, recorded rather than smoothed over. At 64
+threads the RHS is *slower* interleaved (0.033 s against 0.047), the
+initial-data and exact-ring passes are unchanged to within a percent, and
+only the Hankel table — the one array this package fills itself, with a
+plain `Matrix` — prefers it. The likely reason is that every large array
+here gets a good first touch for free: `FieldSet` and `statevector`
+allocate untouched pages, and the first thing to write them is a threaded
+kernel partitioned by block, which is how every later kernel partitions
+them too. TreeAMR's finding stands for the case it was measured on; it
+does not follow automatically downstream, and the two-placement sweep is
+in `bin/benchmark.sbatch` so the question can be re-asked on another
+machine rather than assumed.
+
+Three phases do not scale, and the reasons differ. The stage broadcast is
+serial by construction, above. The Hankel contraction and the coverage
+reduction are memory-bound passes over tens of megabytes, which saturate
+at 2× however many threads are added. And the amplitude scales are erratic
+at high counts — 14.3× at 16 threads, 5.7× at 64 — because at that point
+the pass itself is 5 ms and the cost of spawning is not negligible against
+it; it is once per regrid, so this is left alone rather than given a
+grain-size heuristic.
+
+The compute-bound phases behave as they should: initial data 37×, the
+exact ring 46×, the Hankel table 39× — all more than the memory-bound RHS,
+and the last two more than linear, which is what happens when one thread's
+working set is limited by one NUMA domain's bandwidth and 64 threads'
+is not.
+
 ## Watching a run: the `observer` keyword
 
 `wave_errors` and `track_pulse` return summary numbers, which is what the
@@ -518,14 +670,19 @@ already three near-identical time-stepping loops in `src/`; a fourth in
 | `src/sinewave.jl` | the standing mode and its convergence driver |
 | `src/supergaussian.jl` | the travelling pulse, its AMR driver, and the uniform reference |
 | `src/blast.jl` | the radial blast wave, its Hankel-quadrature exact solution, its AMR driver, and the uniform reference |
+| `src/benchmark.jl` | per-phase and end-to-end timings, for the thread-scaling measurement |
 | `test/sinewave_tests.jl` | convergence order, the interface-order rule, 3D smoke test, energy drift |
 | `test/refinement_tests.jl` | claims about the indicator itself |
 | `test/supergaussian_tests.jl` | a moving refined region tracks the pulse |
 | `test/blast_tests.jl` | the exact ring, 2nd-order convergence to it, a growing refined region, and what a frozen amplitude scale costs |
 | `test/type_tests.jl` | the drivers at `Float32` and at MultiFloats' `Float32x2` — see Precision |
+| `test/threading_tests.jl` | the answer does not move with the thread count |
+| `test/thread_workload.jl` | not a test: the standalone run whose digests the above compares across thread counts |
 | `bin/visualize.jl` | CairoMakie viewer for the 1D cases (own environment; see `bin/Project.toml`) |
 | `bin/visualize2d.jl` | CairoMakie viewer for the blast wave — a different figure, not a flag on the other one |
-| `.github/workflows/CI.yml` | tests on a Julia matrix, plus a job that renders the figures |
+| `bin/benchmark.jl` | the benchmark's CLI — the one script in `bin/` that uses the *package* environment, since it needs no CairoMakie |
+| `bin/benchmark.sbatch` | the thread and page-placement sweep; a SLURM job and an ordinary shell script at once |
+| `.github/workflows/CI.yml` | tests on a Julia matrix, at one thread and at four, plus a job that renders the figures |
 
 `bin/visualize.jl` draws four panels per 1D case — the solution, the
 pointwise error in `u`, the indicator τ, and the volume-weighted L2/L∞
@@ -565,7 +722,11 @@ equation, and belongs upstream where it already lives.
 CI runs the test suite on Julia 1.11 and release, on Linux and macOS, and
 separately renders all three figures — plus the pulse at `Float32`, whose
 conversions the default render does not exercise — and keeps them as
-artifacts. The second job
+artifacts. One extra entry of the matrix runs the suite on **four
+threads**: the thread-independence test spawns a subprocess at the *other*
+count either way, so one threaded job and the serial ones between them
+cover both directions, while a whole extra dimension of the matrix would
+only buy the same guarantee four times over. The figure job
 exists because `bin/` carries its own environment and therefore its own copy
 of the TreeAMR dependency: during development that let the viewer keep
 building against an older TreeAMR than the tests, until it failed on an API
@@ -663,6 +824,28 @@ than as a test that merely still passes.
   19 for a change that touches only the ghost cells. This is the pair the
   viewer draws side by side (`--ops=2`), and the pointwise error goes from
   smooth across the coarse-fine interfaces to visibly kinked at them.
+- Thread scaling on 64 cores (AMD EPYC, 8 NUMA domains; 1792 blocks of
+  `128²`, 29.4M cells): **17.7× on the RHS path, 3.6× on a whole RK4
+  step**, 37–46× on the compute-bound passes. The gap between the first
+  two numbers is the integrator's serial stage arithmetic, and it is 84%
+  of a 64-thread step. The full table, and why interleaving the pages did
+  *not* reproduce TreeAMR's 2–6×, are under
+  [Multi-threading](#multi-threading). `bin/benchmark.sbatch` reproduces
+  the measurement.
+- The four loops that were this package's own to thread, at 8 threads on
+  a 12-core laptop and 1.8M cells: the Hankel table 0.98× → 6.1×, the
+  amplitude scales 1.01× → 4.1×, the coverage reduction → 1.8×, the
+  Hankel contraction 0.98× → 1.1×. The last two are memory-bound and
+  saturate; the numbers are recorded so that a future "why is this only
+  2×" has an answer already measured.
+- `RK4(thread = True())`, which threads the stage broadcasts through
+  Polyester, measured **2.1× slower** than the default at 8 threads
+  (0.030 s → 0.064 s per step): a second thread pool alongside the one
+  KernelAbstractions is already using. Reproduced with the two
+  measurements in either order.
+- Results are **bit-identical** across thread counts — every digit of
+  every digest in `test/thread_workload.jl`, at 1 and at 4 threads, on
+  both a full pulse run and a full blast run.
 
 ## Possible extensions
 
@@ -672,3 +855,10 @@ Not planned, listed because they are the obvious next questions:
 - An adaptive integrator, once TreeAMR's `volume_weighted_norm` is wired
   in as `internalnorm`.
 - First-order form, as a second application of the same mesh.
+- A time integrator whose stage arithmetic is a KernelAbstractions kernel
+  like everything else, which is what the Amdahl term under
+  [Multi-threading](#multi-threading) actually asks for. The cheap
+  version of this — `RK4(thread = True())`, which threads the same
+  broadcasts through Polyester — is measured there and is *worse*, so the
+  extension is a real one: the stage updates have to join the pool that
+  is already running, not start a second.

@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   test:
-    name: Julia ${{ matrix.version }} - ${{ matrix.os }}
+    name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.threads || 1 }} thread(s)
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -22,6 +22,10 @@ jobs:
         # locates it through a `[sources]` entry, which 1.11 introduced.
         version: ["1.11", "1"]
         os: [ubuntu-latest, macOS-latest]
+        include:
+          - version: "1"
+            os: ubuntu-latest
+            threads: 4
     steps:
       - uses: actions/checkout@v7
       - uses: julia-actions/setup-julia@v3
@@ -30,6 +34,13 @@ jobs:
       - uses: julia-actions/cache@v3
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
+        env:
+          # The suite must pass, with identical numbers, threaded as well
+          # as serial (M5). One entry of the matrix is enough to guard
+          # that: the thread-independence test spawns a subprocess at the
+          # *other* count either way, so between this job and the serial
+          # ones both directions are covered.
+          JULIA_NUM_THREADS: ${{ matrix.threads || 1 }}
 
   # The viewer has its own environment and its own copy of the TreeAMR
   # dependency, so the test job above cannot exercise it -- during

@@ -72,6 +72,18 @@ The global reference amplitude of each variable in `vars`: the largest
 One reduction over the whole field set, so it is computed once per
 flagging pass and not once per block.
 
+Threaded over blocks, with one partial maximum per block and the maxima
+combined afterwards. `max` is exact and the partials live in a
+block-indexed array, so the answer is bit-identical whatever the thread
+count — the property TreeAMR's M5 holds itself to, and which stops at the
+first application loop that does not.
+
+!!! warning "Not from inside a flag callback"
+    TreeAMR calls `flag_blocks`' callback concurrently, so this must be
+    evaluated *before* the flagging pass, never inside it. It is:
+    [`refine_flags`](@ref) evaluates the `scales` keyword at its own call
+    site, and the drivers hoist it further still.
+
 !!! note "When a fixed scale is enough"
     For a problem whose amplitude is roughly conserved — the wave
     equation being one — the scale can be measured once from the initial
@@ -85,8 +97,16 @@ flagging pass and not once per block.
     leaves variable 2 with no floor at all and the criterion refines the
     whole domain. Measured; see `CODE.md`.
 """
-field_scales(fs::FieldSet; vars=1:fs.nvars) =
-    [maximum(b -> maximum(abs, interiorview(fs, b, v)), 1:nblocks(fs)) for v in vars]
+function field_scales(fs::FieldSet{T}; vars=1:fs.nvars) where {T}
+    R = real(float(T))
+    partials = Matrix{R}(undef, nblocks(fs), length(vars))
+    Threads.@threads for b in 1:nblocks(fs)
+        for (j, v) in enumerate(vars)
+            partials[b, j] = maximum(abs, interiorview(fs, b, v))
+        end
+    end
+    return [maximum(view(partials, :, j)) for j in 1:length(vars)]
+end
 
 """
     cell_indicator(fs, b, box_tol; scales, vars=1:fs.nvars, ε=T(1//100))
