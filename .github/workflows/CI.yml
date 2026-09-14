@@ -60,7 +60,7 @@ jobs:
           test -s bin/output/pulse_1d.png
           test -s bin/output/blast_2d.png
           test -s bin/output/blast_2d_frozen.png
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: figures
           path: bin/output/*.png
