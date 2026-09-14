@@ -51,6 +51,7 @@ export blast_initial, blast_reference, blast_radial_table, blast_exact,
 export lohner, field_scales, cell_indicator, refine_mark, refine_flags,
        refinement_buffer
 
+include("precision.jl")
 include("evolution.jl")
 include("refinement.jl")
 include("sinewave.jl")

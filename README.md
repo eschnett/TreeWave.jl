@@ -12,9 +12,16 @@ travelling super-Gaussian pulse, used to exercise a refined region that
 follows it; and a 2D radial blast wave, whose feature loses amplitude as
 it spreads and whose refined region therefore has to grow.
 
+Every driver takes the floating-point type to run in as a leading
+argument, defaulting to `Float64` — `track_pulse(Float32, Val(1))` — so a
+case can be run in single precision on a device with no hardware fp64, or
+in a MultiFloats software type. See "Precision" in [CODE.md](CODE.md) for
+what that does and does not buy.
+
 ```bash
 julia --project=. -e 'using Pkg; Pkg.test()'   # the acceptance tests
 julia --project=bin bin/visualize.jl           # solution, error, error norms
+julia --project=bin bin/visualize.jl --type=f32   # the same run, single precision
 julia --project=bin bin/visualize2d.jl         # the blast wave and its mesh
 ```
 

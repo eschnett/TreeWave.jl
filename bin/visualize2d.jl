@@ -5,6 +5,7 @@
 #
 #     julia --project=bin bin/visualize2d.jl
 #     julia --project=bin bin/visualize2d.jl --frozen-scales --out=/tmp
+#     julia --project=bin bin/visualize2d.jl --type=f32
 #
 # A separate script from `visualize.jl` and not a `--dim=2` flag on it,
 # because nothing transfers: that viewer draws one line per block against
@@ -68,21 +69,27 @@ in the same `scales` the run is using, which is why they are an argument
 and not a `field_scales` call inside this function. Under
 `--frozen-scales` recomputing them here would quietly draw the τ the run
 *would* have seen, which is the one thing that figure must not do.
+
+This is also where the run's own floating-point type stops. A run may be
+`Float32`; everything below this point is a figure, and Makie is happiest
+given `Float64`, so the conversion happens once here rather than at every
+plot call.
 """
 function snapshot(fs, t, u; coarsen_tol, scales)
     forest = fs.forest
     blocks = map(1:nblocks(fs)) do b
         k = blockkey(fs, b)
+        ext = block_extent(forest, k)
         # Not transposed: `interiorview` gives `z[i,j]` at `(x_i, y_j)`,
         # which is already `heatmap!`'s convention. Transposing it looks
         # almost right on a radially symmetric field, which is what makes
         # it worth saying.
-        (ext=block_extent(forest, k), u=collect(interiorview(fs, b, 1)),
-         lvl=level(k))
+        (ext=map(e -> (Float64(e[1]), Float64(e[2])), ext),
+         u=Float64.(interiorview(fs, b, 1)), lvl=level(k))
     end
     τ = maximum(b -> cell_indicator(fs, b, coarsen_tol; scales=scales)[1],
                 1:nblocks(fs))
-    return (t=t, blocks=blocks, nblocks=nblocks(fs), τ=τ)
+    return (t=Float64(t), blocks=blocks, nblocks=nblocks(fs), τ=Float64(τ))
 end
 
 """
@@ -267,9 +274,10 @@ measured once from the initial data, this problem's amplitude falls by an
 order of magnitude, and its `∂ₜu` starts at exactly zero. Frozen, the
 indicator refines the entire domain by the second frame.
 """
-function blastcase(; N=8, L=1.0, roots=8, σ=0.08, t_end=0.4, chunk=0.02,
-                   n=1, ops_order=4, refine_tol=0.30, coarsen_tol=0.075,
-                   refresh_scales=true)
+function blastcase(::Type{T}=Float64; N=8, L=one(T), roots=8, σ=T(2//25),
+                  t_end=T(2//5), chunk=T(1//50), n=1, ops_order=4,
+                  refine_tol=T(3//10), coarsen_tol=T(3//40),
+                  refresh_scales=true) where {T}
     # G is set by the operator order, not chosen independently: TreeAMR
     # requires G >= prolongation/2 for point-value operators.
     G = ops_order ÷ 2
@@ -290,7 +298,7 @@ function blastcase(; N=8, L=1.0, roots=8, σ=0.08, t_end=0.4, chunk=0.02,
         return push!(snaps, snapshot(fs, t, u; coarsen_tol=coarsen_tol,
                                      scales=scales))
     end
-    r = track_blast(Val(2); N=N, G=G, roots=roots, L=L, σ=σ, n=n, x₀=x₀,
+    r = track_blast(T, Val(2); N=N, G=G, roots=roots, L=L, σ=σ, n=n, x₀=x₀,
                     ops=Operators(prolongation=ops_order,
                                   restriction=ops_order),
                     t_end=t_end, chunk=chunk, refine_tol=refine_tol,
@@ -298,10 +306,10 @@ function blastcase(; N=8, L=1.0, roots=8, σ=0.08, t_end=0.4, chunk=0.02,
                     refresh_scales=refresh_scales, observer=observer)
     what = refresh_scales ? "refinement tracks it" :
            "amplitude scale frozen — the criterion refines everything"
-    title = @sprintf("Radial blast wave, σ = %.3g — %s\nworst L∞ = %.3g, \
+    title = @sprintf("Radial blast wave, σ = %.3g, %s — %s\nworst L∞ = %.3g, \
                       %d blocks at maxlevel %d (×%.1f), %.0f%% of the ring \
                       at the finest level",
-                     σ, what, r.worst, r.nblocks, r.maxlevel, r.growth,
+                     σ, T, what, r.worst, r.nblocks, r.maxlevel, r.growth,
                      100 * r.covered)
     # The free-space radial solution at the final time, straight from the
     # Hankel table rather than sampled along a ray through the box: a ray
@@ -309,16 +317,25 @@ function blastcase(; N=8, L=1.0, roots=8, σ=0.08, t_end=0.4, chunk=0.02,
     # answer with a *neighbouring* ring, which looks like a second peak.
     ref = blast_reference(L, x₀, σ; rmax=t_end + 6σ)
     tab = blast_radial_table(ref, snaps[end].t)
-    return (snaps=snaps, profile=(rs=collect(ref.rs), us=tab.us), L=L,
-            x₀=x₀, title=title, tracking=refresh_scales,
+    return (snaps=snaps, profile=(rs=collect(ref.rs), us=tab.us),
+            L=Float64(L), x₀=map(Float64, x₀),
+            title=title, tracking=refresh_scales,
             tols=(refine_tol=refine_tol, coarsen_tol=coarsen_tol))
 end
+
+# `--type=` selects the floating-point type the run is computed in. Only the
+# two hardware types are offered: a MultiFloat is a fine thing to *run* (see
+# "Precision" in CODE.md) but Makie cannot plot one, so a viewer flag for it
+# would be an invitation to a confusing failure.
+const FLOATTYPES = Dict("f32" => Float32, "f64" => Float64)
 
 function main(args)
     outdir = joinpath(@__DIR__, "output")
     n = 1
     ops_order = 4
     refresh_scales = true
+    T = Float64
+    typetag = ""
     # Sixel is for a human looking at a terminal; a pipe gets the paths.
     inline = stdout isa Base.TTY
     for a in args
@@ -328,6 +345,14 @@ function main(args)
             n = parse(Int, a[5:end])
         elseif startswith(a, "--ops=")
             ops_order = parse(Int, a[7:end])
+        elseif startswith(a, "--type=")
+            tag = a[8:end]
+            haskey(FLOATTYPES, tag) ||
+                error("--type must be f32 or f64; got $tag")
+            T = FLOATTYPES[tag]
+            # The default type keeps the plain filename, so a Float32 render
+            # never overwrites the figure CI checks.
+            typetag = tag == "f64" ? "" : "_$tag"
         elseif a == "--frozen-scales"
             refresh_scales = false
         elseif a == "--display"
@@ -336,17 +361,18 @@ function main(args)
             inline = false
         else
             error("unknown argument $a; expected --out=, --n=, --ops=, \
-                   --frozen-scales, --display, --no-display")
+                   --type=, --frozen-scales, --display, --no-display")
         end
     end
 
     mkpath(outdir)
     @info "running the blast case"
-    c = blastcase(; n=n, ops_order=ops_order, refresh_scales=refresh_scales)
+    c = blastcase(T; n=n, ops_order=ops_order, refresh_scales=refresh_scales)
     fig = makefigure(c.snaps, c.profile, c.L, c.x₀, c.title; tols=c.tols,
                      tracking=c.tracking)
     path = joinpath(outdir,
-                    refresh_scales ? "blast_2d.png" : "blast_2d_frozen.png")
+                    (refresh_scales ? "blast_2d" : "blast_2d_frozen") *
+                    typetag * ".png")
     save(path, fig)
     inline && display(fig)
     println("wrote $path")

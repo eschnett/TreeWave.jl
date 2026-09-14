@@ -49,7 +49,7 @@ ordinary Gaussian; see the note at the top of this file before raising it.
 """
 function pulse_exact(D, L, x0, σ, t; n=1)
     return function (x, var)
-        d = mod(x[1] - x0 - t + L / 2, L) - L / 2
+        d = wrap(x[1] - x0 - t + L / 2, L) - L / 2
         sg = supergaussian(d, σ, n)
         dsg = dsupergaussian(d, σ, n)
         return var == 1 ? sg : -dsg
@@ -80,14 +80,22 @@ Pass `observer` to watch the run rather than only its outcome: it is
 called as `observer(fs, t, u)` once per chunk (and once at `t = 0`),
 after the data has been scattered into `fs` and before the regrid that
 would invalidate it. This is what the viewer in `bin/` uses.
+
+`T` is the floating-point type the run is computed in, defaulting to
+`Float64`. It is said once, to the forest, and reaches the field set, the
+schedule and the state vector from there. This case needs only `exp` and
+integer powers, so unlike the sine mode it runs at a MultiFloats type as
+well; see "Precision" in `CODE.md`.
 """
-function track_pulse(::Val{D}; N=8, G=2, roots=8, L=1.0, σ=0.05, x0=0.25, n=1,
+function track_pulse(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
+                     σ=T(1//20), x0=T(1//4), n=1,
                      ops=Operators(prolongation=4, restriction=4),
-                     t_end=0.5, chunk=0.05, cfl=0.25, maxlevel_cap=2,
-                     refine_tol=0.30, coarsen_tol=0.075, ε=0.01,
-                     buffer=nothing, observer=nothing) where {D}
-    forest = Forest(ntuple(_ -> roots, D); N=N, G=G, periodic=ntuple(_ -> true, D),
-                    extents=ntuple(_ -> (0.0, L), D))
+                     t_end=T(1//2), chunk=T(1//20), cfl=T(1//4), maxlevel_cap=2,
+                     refine_tol=T(3//10), coarsen_tol=T(3//40), ε=T(1//100),
+                     buffer=nothing, observer=nothing) where {T,D}
+    forest = Forest{T}(ntuple(_ -> roots, D); N=N, G=G,
+                       periodic=ntuple(_ -> true, D),
+                       extents=ntuple(_ -> (zero(T), L), D))
     fs = FieldSet(forest, 2)
 
     # The wave speed is 1, so the pulse travels exactly `chunk` between one
@@ -98,7 +106,7 @@ function track_pulse(::Val{D}; N=8, G=2, roots=8, L=1.0, σ=0.05, x0=0.25, n=1,
     buffer = buffer === nothing ? refinement_buffer(forest, maxlevel_cap, chunk) :
              buffer
 
-    fill_by_coordinates!(pulse_exact(D, L, x0, σ, 0.0; n=n), fs)
+    fill_by_coordinates!(pulse_exact(D, L, x0, σ, zero(T); n=n), fs)
 
     # The indicator's noise floor is referred to a global amplitude, and the
     # wave equation conserves that, so measuring it once from the initial
@@ -111,29 +119,36 @@ function track_pulse(::Val{D}; N=8, G=2, roots=8, L=1.0, σ=0.05, x0=0.25, n=1,
                              coarsen_tol=coarsen_tol, maxlevel_cap=maxlevel_cap, ε=ε)
 
     schedule, _, _ = adapt_to_initial_data!(fs, ops;
-                                            initial=pulse_exact(D, L, x0, σ, 0.0; n=n),
+                                            initial=pulse_exact(D, L, x0, σ, zero(T);
+                                                                n=n),
                                             flag=flag, buffer=buffer, maxpasses=8)
 
     if observer !== nothing
         u0 = statevector(fs)
         gather!(u0, fs)
-        observer(fs, 0.0, u0)
+        observer(fs, zero(T), u0)
     end
 
-    worst = 0.0
-    refined_fraction = Float64[]
-    t = 0.0
-    while t < t_end - 1e-12
-        stop = min(t + chunk, t_end)
+    worst = zero(T)
+    refined_fraction = T[]
+    # Counted rather than accumulated: the old `while t < t_end - 1e-12`
+    # guard compared a time against an absolute slack, and at `Float32`
+    # `1e-12` is far below one ulp of `t`, so the guard degenerated into
+    # `t < t_end` and the final chunk's fate turned on rounding. The chunk
+    # index is exact in every type.
+    nchunks = ceilint(t_end / chunk)
+    for c in 1:nchunks
+        tstart = min((c - 1) * chunk, t_end)
+        t = min(c * chunk, t_end)
+        t > tstart || break
         problem = WaveProblem(fs, schedule)
         u = statevector(fs)
         gather!(u, fs)
         dt = cfl * minimum_spacing(forest)
-        nsteps = max(1, ceil(Int, (stop - t) / dt))
-        sol = solve(ODEProblem(wave_rhs!, u, (t, stop), problem), RK4();
-                    dt=(stop - t) / nsteps, adaptive=false, save_everystep=false)
+        nsteps = max(1, ceilint((t - tstart) / dt))
+        sol = solve(ODEProblem(wave_rhs!, u, (tstart, t), problem), RK4();
+                    dt=(t - tstart) / nsteps, adaptive=false, save_everystep=false)
         scatter!(fs, sol.u[end])
-        t = stop
 
         observer === nothing || observer(fs, t, sol.u[end])
 
@@ -146,14 +161,14 @@ function track_pulse(::Val{D}; N=8, G=2, roots=8, L=1.0, σ=0.05, x0=0.25, n=1,
 
         # How much of the pulse sits in refined blocks -- the measure of
         # whether the refined region is actually following it.
-        inside = 0.0
-        total = 0.0
+        inside = zero(T)
+        total = zero(T)
         for b in 1:nblocks(fs)
             peak = maximum(abs, interiorview(fs, b, 1))
             total = max(total, peak)
             level(blockkey(fs, b)) > 0 && (inside = max(inside, peak))
         end
-        push!(refined_fraction, total > 0 ? inside / total : 0.0)
+        push!(refined_fraction, total > 0 ? inside / total : zero(T))
 
         # The indicator reads a 3-point stencil, so it needs ghosts; and
         # `regrid!` fills them only afterwards, for the transfer.
@@ -168,25 +183,29 @@ function track_pulse(::Val{D}; N=8, G=2, roots=8, L=1.0, σ=0.05, x0=0.25, n=1,
             nblocks=nleaves(forest), maxlevel=maxlevel(forest))
 end
 
+track_pulse(valD::Val; kwargs...) = track_pulse(Float64, valD; kwargs...)
+
 """
 The same travelling pulse on a *uniform* mesh, as the reference the
 adaptive run is judged against: matching the finest uniform mesh is what
 "tracks the pulse without artifacts" has to mean.
 """
-function uniform_pulse(::Val{D}; roots, N, G=2, L=1.0, σ=0.08, x0=0.25, n=1,
+function uniform_pulse(::Type{T}, ::Val{D}; roots, N, G=2, L=one(T),
+                       σ=T(2//25), x0=T(1//4), n=1,
                        ops=Operators(prolongation=4, restriction=4),
-                       t_end=0.5, cfl=0.25) where {D}
-    forest = Forest(ntuple(_ -> roots, D); N=N, G=G, periodic=ntuple(_ -> true, D),
-                    extents=ntuple(_ -> (0.0, L), D))
+                       t_end=T(1//2), cfl=T(1//4)) where {T,D}
+    forest = Forest{T}(ntuple(_ -> roots, D); N=N, G=G,
+                       periodic=ntuple(_ -> true, D),
+                       extents=ntuple(_ -> (zero(T), L), D))
     fs = FieldSet(forest, 2)
     schedule = GhostSchedule(forest, ops)
-    fill_by_coordinates!(pulse_exact(D, L, x0, σ, 0.0; n=n), fs)
+    fill_by_coordinates!(pulse_exact(D, L, x0, σ, zero(T); n=n), fs)
     u = statevector(fs)
     gather!(u, fs)
     dt = cfl * minimum_spacing(forest)
-    nsteps = ceil(Int, t_end / dt)
-    sol = solve(ODEProblem(wave_rhs!, u, (0.0, t_end), WaveProblem(fs, schedule)), RK4();
-                dt=t_end / nsteps, adaptive=false, save_everystep=false)
+    nsteps = ceilint(t_end / dt)
+    sol = solve(ODEProblem(wave_rhs!, u, (zero(T), t_end), WaveProblem(fs, schedule)),
+                RK4(); dt=t_end / nsteps, adaptive=false, save_everystep=false)
     exact = FieldSet(forest, 2)
     fill_by_coordinates!(pulse_exact(D, L, x0, σ, t_end; n=n), exact)
     ue = statevector(exact)
@@ -194,3 +213,5 @@ function uniform_pulse(::Val{D}; roots, N, G=2, L=1.0, σ=0.08, x0=0.25, n=1,
     return (err=volume_weighted_norm(fs, sol.u[end] .- ue; p=Inf),
             cells=nleaves(forest) * N^D)
 end
+
+uniform_pulse(valD::Val; kwargs...) = uniform_pulse(Float64, valD; kwargs...)

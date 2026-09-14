@@ -69,6 +69,23 @@ convergence sweeps and the 3D smoke test; the pulse test is about 5 s.
 - `cell_center(forest, key, idx)` indexes the **stored** array, so
   interior cell `i` is `idx = i + G`. Off-by-`G` here produces plots that
   look almost right.
+- **`Base` is not generic even though the mesh is.** MultiFloats defines no
+  `rem` (so `mod` throws), no conversion to `Integer` (so `ceil(Int, x)`
+  throws), and a conversion only to its own limb type (so
+  `Float64(::Float32x2)` throws while `Float32(::Float32x2)` works). Use
+  `wrap` / `ceilint` / `floorint` / `tofloat64` from `src/precision.jl`
+  rather than the `Base` spellings; each one throws at `Float64x2` and
+  works at `Float64`, so the test suite is the only thing that will tell
+  you.
+- **A decimal literal in a `T` expression is a leak, not a style point.**
+  `0.01` is an fp64 operand and widens the whole expression; write
+  `T(1//100)`. At `Float64` the two are bit-identical, which is what let
+  every measured number stay put when the drivers went generic.
+- **Do not add a Float32 convergence-rate assertion.** Roundoff in the
+  Laplacian is `eps/h²`, which at `Float32` and `h = 1/256` is comparable
+  to the discretization error the sweeps measure. `CODE.md` records this;
+  `test/type_tests.jl` asserts the mesh the criterion chooses instead,
+  which *is* precision-insensitive.
 
 ## Conventions
 

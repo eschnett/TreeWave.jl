@@ -7,4 +7,5 @@ using TreeWave
     include("sinewave_tests.jl")
     include("supergaussian_tests.jl")
     include("blast_tests.jl")
+    include("type_tests.jl")
 end

@@ -45,7 +45,7 @@ this data returns *exactly zero* for variable 2.
 function blast_initial(D, L, x₀, σ; n=1)
     return function (x, var)
         var == 1 || return zero(float(σ))
-        r2 = sum(d -> (mod(x[d] - x₀[d] + L / 2, L) - L / 2)^2, 1:D)
+        r2 = sum(d -> (wrap(x[d] - x₀[d] + L / 2, L) - L / 2)^2, 1:D)
         return supergaussian(sqrt(r2), σ, n)
     end
 end
@@ -76,8 +76,21 @@ costs `nr × nk` floats — 32 MB at the defaults.
 
 The `k` integral is cut at `13/σ`, where the Gaussian envelope is
 `e^(-42)`, and taken by the midpoint rule.
+
+**The table is a host-side `Float64` object whatever the run's type is**, and
+the arguments are converted to `Float64` here rather than at every call site.
+`besselj0` has hardware-float methods only, so there is no choice for a
+software type — but it is also the right answer for a `Float32` run on a
+device, because a reference table is the last thing that should be uploaded
+as fp64. [`blast_exact`](@ref) converts it into the run's own type once, on
+the host, so nothing past that conversion sees a `Float64`. The cost is that the
+reference is capped at `Float64` accuracy; its ~9e-7 quadrature error is four
+orders below the finest discretization error measured against it, so nothing
+this package can resolve notices.
 """
 function blast_reference(L, x₀, σ; rmax, nr=2001, nk=2000)
+    L, σ, rmax = tofloat64(L), tofloat64(σ), tofloat64(rmax)
+    x₀ = map(tofloat64, x₀)
     dk = (13 / σ) / nk
     ks = [(j - 0.5) * dk for j in 1:nk]
     ws = [(σ^2 / 2) * exp(-(k * σ)^2 / 4) * k * dk for k in ks]
@@ -111,8 +124,8 @@ function blast_radial_table(ref, t)
 end
 
 """
-    blast_exact(ref, t)
-    blast_exact(L, x₀, σ, t; n=1, nr=2001, nk=2000)
+    blast_exact([T], ref, t)
+    blast_exact([T], L, x₀, σ, t; n=1, nr=2001, nk=2000)
 
 The exact solution of [`blast_initial`](@ref) at time `t`, as the
 `(x, var) -> value` callback a field set is filled by. **Two dimensions
@@ -144,30 +157,40 @@ records the measured rates, and the quadrature's own error is some four
 orders below the finest discretization error, so what the comparison
 measures is the scheme and not the table.
 """
-function blast_exact(ref, t)
-    tab = blast_radial_table(ref, t)
-    L, x₀, rmax, dr = ref.L, ref.x₀, ref.rmax, ref.dr
-    nimages = ceil(Int, rmax / L)
+function blast_exact(::Type{T}, ref, t) where {T}
+    # The quadrature is `Float64` (see `blast_reference`); converting its two
+    # profiles here is the one and only place that crosses over, so the
+    # closure below — which is what a field set is filled from, and therefore
+    # what would run on a device — is arithmetic in `T` alone.
+    tab = blast_radial_table(ref, tofloat64(t))
+    us, vs = map(T, tab.us), map(T, tab.vs)
+    L, rmax, dr = T(ref.L), T(ref.rmax), T(ref.dr)
+    x₀ = map(T, ref.x₀)
+    nimages = ceil(Int, ref.rmax / ref.L)          # the reference is Float64
     return function (x, var)
-        u = 0.0
-        v = 0.0
+        u = zero(T)
+        v = zero(T)
         for j1 in (-nimages):nimages, j2 in (-nimages):nimages
             r = hypot(x[1] - x₀[1] - j1 * L, x[2] - x₀[2] - j2 * L)
             r < rmax || continue
             q = r / dr
-            i = floor(Int, q) + 1
+            i = floorint(q) + 1
             s = q - (i - 1)
-            u += (1 - s) * tab.us[i] + s * tab.us[i + 1]
-            v += (1 - s) * tab.vs[i] + s * tab.vs[i + 1]
+            u += (1 - s) * us[i] + s * us[i + 1]
+            v += (1 - s) * vs[i] + s * vs[i + 1]
         end
         return var == 1 ? u : v
     end
 end
 
-function blast_exact(L, x₀, σ, t; n=1, nr=2001, nk=2000)
+blast_exact(ref, t) = blast_exact(Float64, ref, t)
+
+function blast_exact(::Type{T}, L, x₀, σ, t; n=1, nr=2001, nk=2000) where {T}
     check_blast_order(n)
-    return blast_exact(blast_reference(L, x₀, σ; rmax=t + 6σ, nr=nr, nk=nk), t)
+    return blast_exact(T, blast_reference(L, x₀, σ; rmax=t + 6σ, nr=nr, nk=nk), t)
 end
+
+blast_exact(L, x₀, σ, t; kwargs...) = blast_exact(Float64, L, x₀, σ, t; kwargs...)
 
 """
 The exact solution exists only for the ordinary Gaussian. Thrown from the
@@ -199,6 +222,9 @@ highest cell still happens to sit on a fine block, and measured, that is
 not hypothetical: the peak measure reports exactly 1.0 for a run whose
 mesh has visibly stopped following the ring. This one reports 0.91 for the
 calibrated run and falls when the mesh falls behind.
+
+A fraction of *cells*, so it is `Float64` at every precision rather than the
+run's own type — see the rule under "Precision" in `CODE.md`.
 """
 function blast_coverage(fs::FieldSet)
     peak = maximum(b -> maximum(abs, interiorview(fs, b, 1)), 1:nblocks(fs))
@@ -247,17 +273,23 @@ Pass `observer` to watch the run rather than only its outcome: it is
 called as `observer(fs, t, u)` once per chunk (and once at `t = 0`), after
 the data has been scattered into `fs` and before the regrid that would
 invalidate it. This is what the viewer in `bin/` uses.
+
+`T` is the floating-point type the run is computed in, defaulting to
+`Float64`. The initial data needs only `exp`, so this case runs at a
+MultiFloats type as well — but the exact ring it is measured against is a
+`Float64` quadrature whatever `T` is; see [`blast_reference`](@ref) and
+"Precision" in `CODE.md`.
 """
-function track_blast(::Val{D}; N=8, G=2, roots=8, L=1.0, σ=0.08, n=1,
-                     x₀=nothing,
+function track_blast(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
+                     σ=T(2//25), n=1, x₀=nothing,
                      ops=Operators(prolongation=4, restriction=4),
-                     t_end=0.4, chunk=0.02, cfl=0.25, maxlevel_cap=2,
-                     refine_tol=0.30, coarsen_tol=0.075, ε=0.01,
+                     t_end=T(2//5), chunk=T(1//50), cfl=T(1//4), maxlevel_cap=2,
+                     refine_tol=T(3//10), coarsen_tol=T(3//40), ε=T(1//100),
                      buffer=nothing, refresh_scales=true,
-                     observer=nothing) where {D}
-    forest = Forest(ntuple(_ -> roots, D); N=N, G=G,
-                    periodic=ntuple(_ -> true, D),
-                    extents=ntuple(_ -> (0.0, L), D))
+                     observer=nothing) where {T,D}
+    forest = Forest{T}(ntuple(_ -> roots, D); N=N, G=G,
+                       periodic=ntuple(_ -> true, D),
+                       extents=ntuple(_ -> (zero(T), L), D))
     fs = FieldSet(forest, 2)
     x₀ = x₀ === nothing ? ntuple(_ -> L / 2, D) : x₀
     check_blast_order(n)
@@ -289,30 +321,33 @@ function track_blast(::Val{D}; N=8, G=2, roots=8, L=1.0, σ=0.08, n=1,
     if observer !== nothing
         u0 = statevector(fs)
         gather!(u0, fs)
-        observer(fs, 0.0, u0)
+        observer(fs, zero(T), u0)
     end
 
-    worst = 0.0
+    worst = zero(T)
     covered = 1.0
-    t = 0.0
-    while t < t_end - 1e-12
-        stop = min(t + chunk, t_end)
+    # Counted rather than accumulated; see the same loop in `track_pulse` for
+    # why an absolute `1e-12` slack cannot survive a change of precision.
+    nchunks = ceilint(t_end / chunk)
+    for c in 1:nchunks
+        tstart = min((c - 1) * chunk, t_end)
+        t = min(c * chunk, t_end)
+        t > tstart || break
         problem = WaveProblem(fs, schedule)
         u = statevector(fs)
         gather!(u, fs)
         dt = cfl * minimum_spacing(forest)
-        nsteps = max(1, ceil(Int, (stop - t) / dt))
-        sol = solve(ODEProblem(wave_rhs!, u, (t, stop), problem), RK4();
-                    dt=(stop - t) / nsteps, adaptive=false,
+        nsteps = max(1, ceilint((t - tstart) / dt))
+        sol = solve(ODEProblem(wave_rhs!, u, (tstart, t), problem), RK4();
+                    dt=(t - tstart) / nsteps, adaptive=false,
                     save_everystep=false)
         scatter!(fs, sol.u[end])
-        t = stop
 
         # Error against the exact ring, at every chunk rather than only at
         # the end: the mesh is rebuilt twenty times over the run and the
         # question is whether any one of those rebuilds hurt.
         exact = FieldSet(forest, 2)
-        fill_by_coordinates!(blast_exact(reference, t), exact)
+        fill_by_coordinates!(blast_exact(T, reference, t), exact)
         ue = statevector(exact)
         gather!(ue, exact)
         worst = max(worst, volume_weighted_norm(fs, sol.u[end] .- ue; p=Inf))
@@ -333,7 +368,7 @@ function track_blast(::Val{D}; N=8, G=2, roots=8, L=1.0, σ=0.08, n=1,
         # holding a mesh that no returned solution was ever computed on,
         # and `nblocks` below is meant to describe the mesh `worst` was
         # measured against.
-        t < t_end - 1e-12 || break
+        c < nchunks || break
         flags = flag_blocks(flag, forest)
         if regrid!(forest, fs, schedule; flags=flags, buffer=buffer)
             schedule = GhostSchedule(forest, ops)
@@ -344,6 +379,8 @@ function track_blast(::Val{D}; N=8, G=2, roots=8, L=1.0, σ=0.08, n=1,
             maxlevel=maxlevel(forest),
             growth=nleaves(forest) / nblocks_initial)
 end
+
+track_blast(valD::Val; kwargs...) = track_blast(Float64, valD; kwargs...)
 
 """
 The same blast wave on a *uniform* mesh, as the reference the adaptive run
@@ -356,11 +393,12 @@ it whose `τ` has fallen below `refine_tol` at a coarser level, and the
 measured cost of that is recorded in `CODE.md`. Matching would mean the
 criterion was refining more than it judged necessary.
 """
-function uniform_blast(::Val{2}; roots, N, G=2, L=1.0, σ=0.08, n=1, x₀=nothing,
+function uniform_blast(::Type{T}, ::Val{2}; roots, N, G=2, L=one(T),
+                       σ=T(2//25), n=1, x₀=nothing,
                        ops=Operators(prolongation=4, restriction=4),
-                       t_end=0.4, cfl=0.25)
-    forest = Forest((roots, roots); N=N, G=G, periodic=(true, true),
-                    extents=ntuple(_ -> (0.0, L), 2))
+                       t_end=T(2//5), cfl=T(1//4)) where {T}
+    forest = Forest{T}((roots, roots); N=N, G=G, periodic=(true, true),
+                       extents=ntuple(_ -> (zero(T), L), 2))
     fs = FieldSet(forest, 2)
     schedule = GhostSchedule(forest, ops)
     x₀ = x₀ === nothing ? (L / 2, L / 2) : x₀
@@ -369,15 +407,17 @@ function uniform_blast(::Val{2}; roots, N, G=2, L=1.0, σ=0.08, n=1, x₀=nothin
     u = statevector(fs)
     gather!(u, fs)
     dt = cfl * minimum_spacing(forest)
-    nsteps = ceil(Int, t_end / dt)
-    sol = solve(ODEProblem(wave_rhs!, u, (0.0, t_end),
+    nsteps = ceilint(t_end / dt)
+    sol = solve(ODEProblem(wave_rhs!, u, (zero(T), t_end),
                            WaveProblem(fs, schedule)), RK4();
                 dt=t_end / nsteps, adaptive=false, save_everystep=false)
     exact = FieldSet(forest, 2)
-    fill_by_coordinates!(blast_exact(L, x₀, σ, t_end), exact)
+    fill_by_coordinates!(blast_exact(T, L, x₀, σ, t_end), exact)
     ue = statevector(exact)
     gather!(ue, exact)
     return (err=volume_weighted_norm(fs, sol.u[end] .- ue; p=Inf),
             l2=volume_weighted_norm(fs, sol.u[end] .- ue),
             h=minimum_spacing(forest), cells=nleaves(forest) * N^2)
 end
+
+uniform_blast(val2::Val{2}; kwargs...) = uniform_blast(Float64, val2; kwargs...)

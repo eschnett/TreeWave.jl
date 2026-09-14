@@ -50,6 +50,13 @@ jobs:
         run: julia --project=bin -e 'using Pkg; Pkg.instantiate()'
       - name: Render the 1D cases
         run: julia --project=bin bin/visualize.jl --no-display
+      # The reduced-precision path has its own conversions -- at the plotting
+      # boundary, and in the blast wave's Float64 reference table -- and none
+      # of them are exercised by the default render. A figure is also the
+      # quickest way to see whether a Float32 run is still the same run: this
+      # one must show the same 16 blocks at maxlevel 2 as the figure above.
+      - name: Render the 1D pulse at Float32
+        run: julia --project=bin bin/visualize.jl --case=pulse --type=f32 --no-display
       - name: Render the 2D blast wave, tracking and with the scale frozen
         run: |
           julia --project=bin bin/visualize2d.jl --no-display
@@ -58,6 +65,7 @@ jobs:
         run: |
           test -s bin/output/sine_1d.png
           test -s bin/output/pulse_1d.png
+          test -s bin/output/pulse_1d_f32.png
           test -s bin/output/blast_2d.png
           test -s bin/output/blast_2d_frozen.png
       - uses: actions/upload-artifact@v7

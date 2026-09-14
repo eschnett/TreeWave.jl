@@ -15,7 +15,7 @@
 # something a run measures rather than something the caller declares.
 
 """
-    lohner(um, u0, up, scale; ε=0.01)
+    lohner(um, u0, up, scale; ε=1//100)
 
 The Löhner error indicator for three consecutive cell values along one
 dimension: the second difference normalized by the first differences,
@@ -40,6 +40,12 @@ every threshold tried. Referring the floor to a global amplitude fixes
 it: negligible regions get a negligible numerator against a fixed floor,
 and score ~0. See [`field_scales`](@ref).
 
+`ε` defaults to `1//100` converted to `scale`'s own type rather than to the
+literal `0.01`. The literal is a `Float64` operand and would drag the whole
+denominator — and therefore every `τ` — into `Float64` however the field is
+stored; the rational is exact and folds away at compile time. See "Precision"
+in `CODE.md`.
+
 !!! note "Not the canonical threshold"
     Löhner's usual `τ > 0.8` is a shock detector. Smooth data never comes
     close, so thresholds for a problem like this one are much smaller and
@@ -50,7 +56,7 @@ inflection points score zero even though the feature is right there. That
 is why the reduction to a block verdict below is a maximum over cells
 rather than a vote, and why the reported box is a bounding box.
 """
-function lohner(um, u0, up, scale; ε=0.01)
+function lohner(um, u0, up, scale; ε=oftype(float(scale), 1//100))
     num = abs(up - 2 * u0 + um)
     den = abs(up - u0) + abs(u0 - um) + 4 * ε * abs(scale)
     return iszero(den) ? zero(num) : num / den
@@ -83,7 +89,7 @@ field_scales(fs::FieldSet; vars=1:fs.nvars) =
     [maximum(b -> maximum(abs, interiorview(fs, b, v)), 1:nblocks(fs)) for v in vars]
 
 """
-    cell_indicator(fs, b, box_tol; scales, vars=1:fs.nvars, ε=0.01)
+    cell_indicator(fs, b, box_tol; scales, vars=1:fs.nvars, ε=T(1//100))
 
 The worst [`lohner`](@ref) indicator over every interior cell, dimension,
 and variable of block `b`, together with the bounding box of the cells
@@ -105,7 +111,7 @@ looks smooth.
     verdict silently rather than raising anything.
 """
 function cell_indicator(fs::FieldSet{T,D}, b::Integer, box_tol;
-                        scales, vars=1:fs.nvars, ε=0.01) where {T,D}
+                        scales, vars=1:fs.nvars, ε=T(1//100)) where {T,D}
     forest = fs.forest
     N, G = forest.N, forest.G
     G >= 1 || throw(ArgumentError(
@@ -147,7 +153,7 @@ end
 
 """
     refine_mark(fs, b, k; scales, refine_tol, coarsen_tol, maxlevel_cap,
-                vars=1:fs.nvars, ε=0.01)
+                vars=1:fs.nvars, ε=T(1//100))
 
 The regrid mark for block `b` with key `k`, in the form
 [`flag_blocks`](@ref) accepts: either a bare `RegridFlag` or a
@@ -205,7 +211,7 @@ alternate regrids.
 """
 function refine_mark(fs::FieldSet{T,D}, b::Integer, k::MortonKey{D};
                      scales, refine_tol, coarsen_tol, maxlevel_cap,
-                     vars=1:fs.nvars, ε=0.01) where {T,D}
+                     vars=1:fs.nvars, ε=T(1//100)) where {T,D}
     coarsen_tol < refine_tol || throw(ArgumentError(
         "coarsen_tol ($coarsen_tol) must lie below refine_tol ($refine_tol): the " *
         "gap between them is the dead band that stops blocks flickering"))
@@ -223,7 +229,7 @@ function refine_mark(fs::FieldSet{T,D}, b::Integer, k::MortonKey{D};
 end
 
 """
-    refine_flags(fs; refine_tol, coarsen_tol, maxlevel_cap, scales, vars, ε=0.01)
+    refine_flags(fs; refine_tol, coarsen_tol, maxlevel_cap, scales, vars, ε)
 
 [`refine_mark`](@ref) for every leaf, as the flag vector `regrid!` takes.
 `scales` defaults to a fresh [`field_scales`](@ref) reduction, computed
@@ -264,7 +270,7 @@ as an opaque rejection from inside `regrid!`.
 """
 function refinement_buffer(forest::Forest, maxlevel_cap::Integer, travel::Real)
     h = spacing(forest, maxlevel_cap)
-    cells = ceil(Int, travel / h) + 1
+    cells = ceilint(travel / h) + 1
     cells <= forest.N || throw(ArgumentError(
         "a feature travelling $travel between regrids needs a $cells-cell margin " *
         "at level $maxlevel_cap (h = $h), which exceeds the block width N = " *

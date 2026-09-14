@@ -15,6 +15,9 @@ application.
 - Use only TreeAMR's public API. Nothing here reaches into TreeAMR's
   internals, and nothing here is mesh machinery that belongs upstream.
 - Be small enough to read in one sitting.
+- Run in the caller's floating-point type, not only `Float64` — TreeAMR's
+  mesh is generic and an application that is not would give the genericity
+  nowhere to go. See Precision.
 
 ## Scope and non-goals
 
@@ -227,6 +230,123 @@ help, because the two sides of an interface get their ghosts from
 different operators. `test/sinewave_tests.jl` asserts all four
 combinations, so the rule is guarded here and not merely documented.
 
+## Precision
+
+TreeAMR's mesh is generic in its floating-point type: `Forest{D,T}` carries
+the type the *geometry is computed in*, not merely stored in, and `FieldSet`
+and `GhostSchedule` default their element type to the forest's. This package
+follows it, so that a run can be done at `Float32` — the point being test runs
+on a device with no hardware fp64, which is exactly what a low-end GPU is —
+or at a MultiFloats type, which is a software float and therefore evidence
+that no fp64 path is load-bearing anywhere.
+
+Every driver takes the type as a **leading positional argument**, spelled as
+TreeAMR spells `spacing(T, forest, level)`:
+
+    wave_errors(Float32, Val(1); N=16, G=2, ops=ops)
+    track_pulse(Float32, Val(1); roots=8, N=8)
+    track_blast(Float32, Val(2))
+
+It defaults to `Float64`, so every existing call site — the tests, the
+viewers, the numbers below — is unchanged. It is said once, to the `Forest`,
+and reaches the field set, the schedule, the state vector and the coordinates
+handed to every initial-data callback from there.
+
+### The rule
+
+**Physical quantities carry `T`; counts and ratios of counts do not.** Errors,
+norms, spacings, times, amplitudes and τ are `T`. `nblocks`, `nsteps`,
+`maxlevel`, `growth` (a ratio of leaf counts) and `blast_coverage` (a fraction
+of cells) stay `Int` or `Float64`. `track_pulse`'s `tracking` is a ratio of
+*amplitudes*, so it is `T`.
+
+**No floating-point literal may appear where `T` is in play.** `0.01` is an
+fp64 operand and drags the expression with it; `T(1//100)` is exact and folds
+at compile time. Every keyword default is written that way — `cfl=T(1//4)`,
+`σ=T(2//25)`, `coarsen_tol=T(3//40)` — and at `Float64` each is bit-identical
+to the decimal it replaced, which is why no measured number below moved.
+
+Two literals were not merely a type leak but a bug waiting for a change of
+precision:
+
+- `ε=0.01`, the Löhner noise floor, multiplied straight into the denominator,
+  so **every** τ came out `Float64` however the field was stored.
+- `while t < t_end - 1e-12`, the chunk-loop guard. At `Float32` `1e-12` is far
+  below one ulp of `t`, so the guard degenerates into `t < t_end` and whether
+  the final chunk runs turns on rounding. Both loops now count chunks, which
+  is exact in every type.
+
+### Base does not come along
+
+The mesh is generic; `Base` is not. MultiFloats.jl implements `floor`, `ceil`,
+`sqrt`, `exp`, `log` and integer powers, but **no `rem`** — so `mod` is a
+`MethodError` — and **no conversion to `Integer`**, nor to `Float64` (only to
+its own limb type, so `Float32(::Float32x2)` works and `Float64(::Float32x2)`
+does not). Every one of those sits on a path a driver takes. `src/precision.jl`
+bridges them, and is the whole of the workaround:
+
+| spelling | why not the obvious one |
+|---|---|
+| `wrap(x, L)` | `mod` goes through `rem`. `x - L·floor(x/L)` is the same function for `L > 0`, and at `L = 1` — every run here — bit-identical. |
+| `ceilint`, `floorint` | `ceil(Int, x)` closes through a conversion to `Integer`. The fallback goes via `BigFloat`, the one conversion every `AbstractFloat` has, and only once the value is already an exact integer. |
+| `tofloat64` | the bridge to the blast wave's reference table. Same story. |
+
+The `BigFloat` fallbacks allocate, which is why they are confined to what they
+convert: loop counts, evaluated a handful of times per run, and one subscript
+into a `Float64` lookup table. A hardware float never reaches them.
+
+### What each type is for, and what is not available
+
+| type | what it catches |
+|---|---|
+| `Float64` | the default; where every convergence order is measured |
+| `Float32` | the **leak detector** — a stray `Float64` operand widens the result, so a returned `Float64` names the leak |
+| `Float32x2` | the **software-float** probe: two `Float32` limbs, which no fp64 fast path can serve. It cannot detect leaks (MultiFloats promotes `Float64` *downward*, absorbing them silently); it tests that nothing depends on a hardware float at all. `Float64x2` behaves the same way and is what a run wanting more precision than `Float64` would use. |
+
+Two things are **not** available at a MultiFloat, both recorded rather than
+worked around:
+
+- **The sine mode**, because it is built on `sin` and `cos`, which MultiFloats
+  does not implement: they `error`, pointing at
+  `MultiFloats.use_bigfloat_transcendentals()`, which evals BigFloat-backed
+  methods into `Base`. Neither this package nor TreeAMR calls that; a caller
+  who wants it may.
+- **A reference more accurate than `Float64`.** The blast wave's exact ring is
+  a Hankel quadrature over `besselj0`, which SpecialFunctions defines for
+  hardware floats only. [`blast_reference`](src/blast.jl) therefore keeps its
+  table in `Float64` on the host at every precision, and
+  [`blast_exact`](src/blast.jl) converts it into `T` **once, outside the
+  per-cell closure** — so the closure a field set is filled from is arithmetic
+  in `T` alone and no fp64 array would ever be uploaded to a device. The
+  quadrature's own ~9e-7 error is four orders below the finest discretization
+  error measured against it, so nothing this package can resolve notices the
+  cap.
+
+### What `Float32` cannot do
+
+Roundoff in the Laplacian is `ε/h²`, because the second difference is divided
+by `h²`. At `Float32` and `h = 1/256` that is ~8e-3 — *comparable to the
+discretization error the finest mesh of the convergence sweeps measures*. So
+**the measured second-order rates cannot be reproduced at `Float32`**, and
+`test/type_tests.jl` does not assert them: moving the meshes until a rate came
+out right would be fitting the test to the answer. What it asserts instead is
+what survives a change of precision — the types, boundedness, and the mesh the
+criterion chooses.
+
+That last one is the claim worth having, and it holds. Measured, at the
+calibrated tolerances:
+
+| run | `Float64` | `Float32` |
+|---|---|---|
+| pulse, `t_end = 0.5` | L∞ 0.09609, 16 blocks, level 2 | L∞ 0.09687, 16 blocks, level 2 |
+| blast, `t_end = 0.4` | L∞ 0.0297, 136 → 820 blocks, 91% covered | L∞ 0.0298, 136 → 820 blocks, 91% covered |
+| sine, `N = 8`, two levels | L2 0.0033392, L∞ 0.0074446 | L2 0.0033391, L∞ 0.0074439 |
+
+The blast wave agrees on the block count, the depth *and* the coverage
+fraction — the refinement criterion's decisions are precision-insensitive even
+where the error is not, which is what makes a `Float32` run a rehearsal for
+the `Float64` one rather than a different experiment.
+
 ## The refinement criterion
 
 Refinement is for **resolution**, not amplitude. The first version of this
@@ -392,6 +512,7 @@ already three near-identical time-stepping loops in `src/`; a fourth in
 | file | contents |
 |---|---|
 | `src/TreeWave.jl` | module shell: `using`s, exports, includes |
+| `src/precision.jl` | the `Base` operations a software float type does not provide, bridged — see Precision |
 | `src/evolution.jl` | the RHS kernel, `WaveProblem`, `wave_rhs!`, `convergence_rate` |
 | `src/refinement.jl` | the per-cell refinement indicator and its reduction to block marks |
 | `src/sinewave.jl` | the standing mode and its convergence driver |
@@ -401,6 +522,7 @@ already three near-identical time-stepping loops in `src/`; a fourth in
 | `test/refinement_tests.jl` | claims about the indicator itself |
 | `test/supergaussian_tests.jl` | a moving refined region tracks the pulse |
 | `test/blast_tests.jl` | the exact ring, 2nd-order convergence to it, a growing refined region, and what a frozen amplitude scale costs |
+| `test/type_tests.jl` | the drivers at `Float32` and at MultiFloats' `Float32x2` — see Precision |
 | `bin/visualize.jl` | CairoMakie viewer for the 1D cases (own environment; see `bin/Project.toml`) |
 | `bin/visualize2d.jl` | CairoMakie viewer for the blast wave — a different figure, not a flag on the other one |
 | `.github/workflows/CI.yml` | tests on a Julia matrix, plus a job that renders the figures |
@@ -410,6 +532,10 @@ pointwise error in `u`, the indicator τ, and the volume-weighted L2/L∞
 norms over the whole state against time — with one line per block colored
 by refinement level. `--ops=2` reruns with order-2 operators, which is the
 quickest way to see the interface-order rule rather than read about it.
+`--type=f32` reruns in single precision, which is the quickest way to see
+that it is the *same run* — same blocks, same levels, same τ — rather than
+read that either. Both viewers take it; only the two hardware types are
+offered, because Makie cannot plot a MultiFloat.
 
 `bin/visualize2d.jl` is a separate script and not a `--dim=2` flag,
 because nothing transfers: a line per block against `x` is not a worse
@@ -437,7 +563,9 @@ The tests are ported from TreeAMR's own `test/wave_tests.jl`, minus its
 equation, and belongs upstream where it already lives.
 
 CI runs the test suite on Julia 1.11 and release, on Linux and macOS, and
-separately renders all three figures and keeps them as artifacts. The second job
+separately renders all three figures — plus the pulse at `Float32`, whose
+conversions the default render does not exercise — and keeps them as
+artifacts. The second job
 exists because `bin/` carries its own environment and therefore its own copy
 of the TreeAMR dependency: during development that let the viewer keep
 building against an older TreeAMR than the tests, until it failed on an API
@@ -526,6 +654,10 @@ than as a test that merely still passes.
 - Blast wave with the amplitude scale frozen at `t = 0`: 1024 blocks — the
   whole domain at level 2 — against 208 for the refreshed run at `t = 0.1`.
   See the refinement section for why it fails two separate ways.
+- Reduced precision, same runs: the `Float64`/`Float32` table under Precision
+  above. The pulse and the blast wave reach the *same mesh* at both — same
+  block count, same depth, and for the blast the same 91% ring coverage — with
+  L∞ agreeing to under 1%.
 - Sine mode at 0.9 periods, `N = 16`, `roots = 4`, two levels: final L∞
   0.0063 with order-4 operators against 0.122 with order-2 — a factor of
   19 for a change that touches only the ghost cells. This is the pair the

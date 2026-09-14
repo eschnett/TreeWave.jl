@@ -6,6 +6,7 @@
 #     julia --project=bin bin/visualize.jl
 #     julia --project=bin bin/visualize.jl --case=pulse --n=2 --out=/tmp
 #     julia --project=bin bin/visualize.jl --case=sine --ops=2
+#     julia --project=bin bin/visualize.jl --type=f32
 #
 # The figures are written as PNGs and, when stdout is a terminal, also
 # drawn inline via SixelTerm. Piped or redirected output skips the inline
@@ -49,7 +50,8 @@ per-cell quantity `cell_indicator` reduces to a single verdict. Recomputed
 here rather than returned by the criterion, because the criterion only ever
 needs the maximum and the bounding box.
 """
-function block_taus(fs, b, scales; vars=1:fs.nvars, ε=0.01)
+function block_taus(fs, b, scales; vars=1:fs.nvars,
+                    ε=oftype(float(first(scales)), 1//100))
     forest = fs.forest
     G, N = forest.G, forest.N
     ws = [blockview(fs, b, v) for v in vars]
@@ -63,6 +65,12 @@ One frame of a run: the per-block solution in 1D, and the global error
 norms. Built inside the `observer` callback, where `fs` is scattered from
 `u` and still describes the mesh `u` was computed on -- after a regrid it
 would not.
+
+This is also where the run's own floating-point type stops: a run may be
+`Float32`, and Makie is happiest given `Float64`, so every array that
+reaches the figure is converted here rather than at a dozen plot calls. The
+*evaluation* above it stays in the run's type -- `exactf` is handed `x` as
+the mesh produced it.
 """
 function snapshot(fs, t, u, exactf)
     forest = fs.forest
@@ -76,8 +84,11 @@ function snapshot(fs, t, u, exactf)
         x = [cell_center(forest, k, (i + G,))[1] for i in 1:N]
         num = collect(interiorview(fs, b, 1))
         exact = [exactf((xi,), 1) for xi in x]
-        (x=x, u=num, exact=exact, err=num .- exact, lvl=level(k),
-         tau=block_taus(fs, b, scales), ext=block_extent(forest, k)[1])
+        ext = block_extent(forest, k)[1]
+        (x=Float64.(x), u=Float64.(num), exact=Float64.(exact),
+         err=Float64.(num .- exact), lvl=level(k),
+         tau=Float64.(block_taus(fs, b, scales)),
+         ext=(Float64(ext[1]), Float64(ext[2])))
     end
 
     # Norms are taken over the whole state vector -- both u and ∂ₜu -- so
@@ -88,9 +99,9 @@ function snapshot(fs, t, u, exactf)
     gather!(ue, exactfs)
     d = u .- ue
 
-    return (t=t, blocks=blocks,
-            l2=volume_weighted_norm(fs, d),
-            linf=volume_weighted_norm(fs, d; p=Inf))
+    return (t=Float64(t), blocks=blocks,
+            l2=Float64(volume_weighted_norm(fs, d)),
+            linf=Float64(volume_weighted_norm(fs, d; p=Inf)))
 end
 
 """
@@ -126,8 +137,8 @@ function makefigure(snaps, exactf, L, title; tols, steering)
         vlines!(ax, edges; color=(:gray, 0.3), linewidth=0.5)
     end
 
-    xs = range(0, L; length=4000)
-    lines!(ax1, xs, [exactf((x,), 1) for x in xs];
+    xs = range(zero(L), L; length=4000)
+    lines!(ax1, Float64.(xs), [Float64(exactf((x,), 1)) for x in xs];
            color=(:black, 0.55), linewidth=1, linestyle=:dash)
 
     # Small enough to see individual cells?  Then show them.
@@ -201,22 +212,25 @@ sampling there would flatter the scheme. At a quarter or three-quarter
 period `cos(ωT) = 0`, so `u` itself vanishes and the solution panel would
 show nothing but the error again.
 """
-function sinecase(; D=1, N=16, L=1.0, m=1, roots=4, periods=0.9,
-                  ops_order=4)
+function sinecase(::Type{T}=Float64; D=1, N=16, L=one(T), m=1, roots=4,
+                 periods=T(9//10), ops_order=4) where {T}
     # G is set by the operator order, not chosen independently: TreeAMR
     # requires G >= prolongation/2 for point-value operators.
     G = ops_order ÷ 2
     snaps = []
     observer = (fs, t, u) -> push!(snaps, snapshot(fs, t, u,
                                                   wave_exact(D, L, m, t)))
-    r = wave_errors(Val(D); N=N, G=G, roots=roots, L=L, m=m, periods=periods,
+    r = wave_errors(T, Val(D); N=N, G=G, roots=roots, L=L, m=m, periods=periods,
                     ops=Operators(prolongation=ops_order,
                                   restriction=ops_order),
                     observer=observer, nsnapshots=97)
     title = @sprintf("Standing sine mode, m = %d — two-level mesh, order-%d \
-                      operators\nfinal L2 = %.3g, L∞ = %.3g at h = %.3g",
-                     m, ops_order, r.l2, r.linf, r.h)
-    return (snaps=snaps, exactf=wave_exact(D, L, m, snaps[end].t), L=L,
+                      operators, %s\nfinal L2 = %.3g, L∞ = %.3g at h = %.3g",
+                     m, ops_order, T, r.l2, r.linf, r.h)
+    # The overlay is evaluated at the last *snapshot* time, which `snapshot`
+    # has already converted to Float64 -- so hand the exact solution the
+    # run's own type back, or it would be built in Float64.
+    return (snaps=snaps, exactf=wave_exact(D, L, m, T(snaps[end].t)), L=L,
             title=title, tols=(refine_tol=0.30, coarsen_tol=0.075),
             steering=false)
 end
@@ -226,27 +240,34 @@ The travelling pulse with a refined region that follows it. The refined
 blocks should sit under the pulse, and the norms should show what each
 regrid costs.
 """
-function pulsecase(; D=1, N=8, L=1.0, roots=8, σ=0.08, x0=0.25, n=1,
-                   t_end=0.5, chunk=0.02, ops_order=4,
-                   refine_tol=0.30, coarsen_tol=0.075)
+function pulsecase(::Type{T}=Float64; D=1, N=8, L=one(T), roots=8, σ=T(2//25),
+                  x0=T(1//4), n=1, t_end=T(1//2), chunk=T(1//50), ops_order=4,
+                  refine_tol=T(3//10), coarsen_tol=T(3//40)) where {T}
     G = ops_order ÷ 2
     snaps = []
     observer = (fs, t, u) -> push!(snaps, snapshot(fs, t, u,
                                     pulse_exact(D, L, x0, σ, t; n=n)))
-    r = track_pulse(Val(D); N=N, G=G, roots=roots, L=L, σ=σ, x0=x0, n=n,
+    r = track_pulse(T, Val(D); N=N, G=G, roots=roots, L=L, σ=σ, x0=x0, n=n,
                     ops=Operators(prolongation=ops_order,
                                   restriction=ops_order),
                     t_end=t_end, chunk=chunk, refine_tol=refine_tol,
                     coarsen_tol=coarsen_tol, observer=observer)
-    title = @sprintf("Travelling super-Gaussian pulse, n = %d, σ = %.3g — \
+    title = @sprintf("Travelling super-Gaussian pulse, n = %d, σ = %.3g, %s — \
                       refinement tracks it\nworst L∞ = %.3g over the run, \
                       %d blocks at maxlevel %d",
-                     n, σ, r.worst, r.nblocks, r.maxlevel)
-    return (snaps=snaps, exactf=pulse_exact(D, L, x0, σ, snaps[end].t; n=n),
+                     n, σ, T, r.worst, r.nblocks, r.maxlevel)
+    return (snaps=snaps,
+            exactf=pulse_exact(D, L, x0, σ, T(snaps[end].t); n=n),
             L=L, title=title,
             tols=(refine_tol=refine_tol, coarsen_tol=coarsen_tol),
             steering=true)
 end
+
+# `--type=` selects the floating-point type the run is computed in. Only the
+# two hardware types are offered: a MultiFloat is a fine thing to *run* (see
+# "Precision" in CODE.md) but Makie cannot plot one, so a viewer flag for it
+# would be an invitation to a confusing failure.
+const FLOATTYPES = Dict("f32" => Float32, "f64" => Float64)
 
 function main(args)
     case = "both"
@@ -254,6 +275,8 @@ function main(args)
     n = 1
     dim = 1
     ops_order = 4
+    T = Float64
+    typetag = ""
     # Sixel is for a human looking at a terminal; a pipe gets the paths.
     inline = stdout isa Base.TTY
     for a in args
@@ -267,13 +290,21 @@ function main(args)
             ops_order = parse(Int, a[7:end])
         elseif startswith(a, "--dim=")
             dim = parse(Int, a[7:end])
+        elseif startswith(a, "--type=")
+            tag = a[8:end]
+            haskey(FLOATTYPES, tag) ||
+                error("--type must be f32 or f64; got $tag")
+            T = FLOATTYPES[tag]
+            # The default type keeps the plain filename, so a Float32 render
+            # never overwrites the figure CI checks.
+            typetag = tag == "f64" ? "" : "_$tag"
         elseif a == "--display"
             inline = true
         elseif a == "--no-display"
             inline = false
         else
             error("unknown argument $a; expected --case=, --out=, --n=, \
-                   --ops=, --dim=, --display, --no-display")
+                   --ops=, --dim=, --type=, --display, --no-display")
         end
     end
     case in ("both", "sine", "pulse") ||
@@ -285,16 +316,16 @@ function main(args)
 
     mkpath(outdir)
     written = String[]
-    for (name, build) in (("sine", () -> sinecase(; D=dim,
+    for (name, build) in (("sine", () -> sinecase(T; D=dim,
                                                   ops_order=ops_order)),
-                          ("pulse", () -> pulsecase(; D=dim, n=n,
+                          ("pulse", () -> pulsecase(T; D=dim, n=n,
                                                     ops_order=ops_order)))
         (case == "both" || case == name) || continue
         @info "running the $name case"
         c = build()
         fig = makefigure(c.snaps, c.exactf, c.L, c.title; tols=c.tols,
                          steering=c.steering)
-        path = joinpath(outdir, "$(name)_$(dim)d.png")
+        path = joinpath(outdir, "$(name)_$(dim)d$(typetag).png")
         save(path, fig)
         inline && display(fig)
         push!(written, path)

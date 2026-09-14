@@ -9,14 +9,31 @@
 # answer is known at every time, this is the initial condition that pins
 # down the *order* of the discretization.
 
-"""Angular frequency of the `m`-th sine mode on a box of side `L`."""
-wave_omega(D, L, m) = 2π * m * sqrt(D) / L
+"""
+Angular frequency of the `m`-th sine mode on a box of side `L`.
 
-"""The exact solution, as a `(x, v) -> value` callback for a field set."""
+The type follows `L`, and every constant is built in it: `2π` is a `Float64`
+and `sqrt(D)` with an `Int` `D` is another, so the obvious spelling would
+hand a `Float32` box a `Float64` frequency and promote the whole solution
+back up with it. See "Precision" in `CODE.md`.
+"""
+function wave_omega(D, L, m)
+    T = typeof(float(L))
+    return 2 * T(π) * m * sqrt(T(D)) / L
+end
+
+"""
+The exact solution, as a `(x, v) -> value` callback for a field set.
+
+`2π` is built once here rather than inside the closure: for a software float
+type `T(π)` goes through `BigFloat`, which must not happen per cell.
+"""
 function wave_exact(D, L, m, t)
+    T = typeof(float(L))
     ω = wave_omega(D, L, m)
+    twoπ = 2 * T(π)
     return function (x, var)
-        shape = prod(sin(2π * m * x[d] / L) for d in 1:D)
+        shape = prod(sin(twoπ * m * x[d] / L) for d in 1:D)
         return var == 1 ? cos(ω * t) * shape : -ω * sin(ω * t) * shape
     end
 end
@@ -26,20 +43,27 @@ A two-level hierarchy: a `roots^D` periodic box with the middle sub-box
 refined once, held fixed in physical space as `N` varies so that a
 convergence study really does just shrink `h`. With `refined=false` the
 same box is left uniform, as a control.
+
+The leading `T` is the floating-point type the whole run is computed in; it
+reaches the field set, the schedule and the state vector by way of the
+forest, which is the only place it has to be said. It defaults to `Float64`.
 """
-function wave_forest(::Val{D}, N, G; roots=4, L=1.0, refined=true) where {D}
-    forest = Forest(ntuple(_ -> roots, D); N=N, G=G,
-                    periodic=ntuple(_ -> true, D),
-                    extents=ntuple(_ -> (0.0, L), D))
+function wave_forest(::Type{T}, ::Val{D}, N, G; roots=4, L=one(T),
+                     refined=true) where {T,D}
+    forest = Forest{T}(ntuple(_ -> roots, D); N=N, G=G,
+                       periodic=ntuple(_ -> true, D),
+                       extents=ntuple(_ -> (zero(T), L), D))
     refined || return forest
     targets = filter(forest.leaves) do k
         ext = block_extent(forest, k)
-        all(d -> 0.25L < (ext[d][1] + ext[d][2]) / 2 < 0.75L, 1:D)
+        all(d -> L / 4 < (ext[d][1] + ext[d][2]) / 2 < 3L / 4, 1:D)
     end
     refine!(forest, targets)
     balance!(forest)
     return forest
 end
+
+wave_forest(valD::Val, N, G; kwargs...) = wave_forest(Float64, valD, N, G; kwargs...)
 
 """
 Evolve the sine mode to `t_end` with fixed-step RK4 and return the
@@ -50,31 +74,38 @@ called as `observer(fs, t, u)` at `nsnapshots` times spanning the run,
 with `fs` already scattered from `u`, which is what the viewer in `bin/`
 uses. Leaving it `nothing` keeps the cheap path — no intermediate
 solution is stored.
+
+`T` is the floating-point type the run is computed in, defaulting to
+`Float64`. Note that this case needs `sin` and `cos`, so it is not
+available at a MultiFloats type; see "Precision" in `CODE.md`.
 """
-function wave_errors(::Val{D}; N, G=1, ops=Operators(prolongation=2, restriction=2),
-                     roots=4, L=1.0, m=1,
-                     cfl=0.25, periods=0.25, alg=RK4(), refined=true,
-                     observer=nothing, nsnapshots=64) where {D}
-    forest = wave_forest(Val(D), N, G; roots=roots, L=L, refined=refined)
+function wave_errors(::Type{T}, ::Val{D}; N, G=1,
+                     ops=Operators(prolongation=2, restriction=2),
+                     roots=4, L=one(T), m=1,
+                     cfl=T(1//4), periods=T(1//4), alg=RK4(), refined=true,
+                     observer=nothing, nsnapshots=64) where {T,D}
+    forest = wave_forest(T, Val(D), N, G; roots=roots, L=L, refined=refined)
     fs = FieldSet(forest, 2)
     problem = WaveProblem(fs, GhostSchedule(forest, ops))
 
-    fill_by_coordinates!(wave_exact(D, L, m, 0.0), fs)
+    fill_by_coordinates!(wave_exact(D, L, m, zero(T)), fs)
     u0 = statevector(fs)
     gather!(u0, fs)
 
     h = minimum_spacing(forest)
-    t_end = periods * 2π / wave_omega(D, L, m)
+    t_end = periods * 2 * T(π) / wave_omega(D, L, m)
     dt = cfl * h
-    nsteps = ceil(Int, t_end / dt)
+    nsteps = ceilint(t_end / dt)
     dt = t_end / nsteps                          # land exactly on t_end
 
     # `saveat` spans the run inclusive of both ends, so `sol.u[end]` is
     # still the solution at `t_end` and the error below is unaffected.
-    saveat = observer === nothing ? Float64[] :
-             collect(range(0.0, t_end; length=nsnapshots))
+    saveat = observer === nothing ? T[] :
+             collect(range(zero(T), t_end; length=nsnapshots))
 
-    prob = ODEProblem(wave_rhs!, u0, (0.0, t_end), problem)
+    # The tspan, not the state, is what fixes the *time* type for SciML, so
+    # `dt` and every `t` handed to the RHS are `T` only because of this.
+    prob = ODEProblem(wave_rhs!, u0, (zero(T), t_end), problem)
     sol = solve(prob, alg; dt=dt, adaptive=false, save_everystep=false,
                 saveat=saveat)
 
@@ -95,3 +126,5 @@ function wave_errors(::Val{D}; N, G=1, ops=Operators(prolongation=2, restriction
             linf=volume_weighted_norm(fs, err; p=Inf),
             h=h, nsteps=nsteps, nblocks=nleaves(forest))
 end
+
+wave_errors(valD::Val; kwargs...) = wave_errors(Float64, valD; kwargs...)
