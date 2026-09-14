@@ -90,11 +90,15 @@ Match TreeAMR's style, since the two are read together:
 
 ## Repository facts
 
-- `Manifest.toml` is gitignored (both root and `bin/`). So is this file.
+- `Manifest.toml` is gitignored (both root and `bin/`), as is `TODO.md`. This
+  file is *not* — `CLAUDE.md` is committed, so an edit to it lands in the diff
+  and belongs in the commit message like any other change.
 - **`bin/` has its own Manifest**, so `Pkg.update("TreeAMR")` in the root does
   not touch it. After a TreeAMR change, update both or the viewer fails with a
   `MethodError` on an API the tests are already using.
 - `bin/output/` is gitignored; the viewer writes PNGs there.
 - `CODE.md` is committed. `README.md` is the short public blurb.
-- There are no commits yet on `main` and no git remote configured — do not
-  push or add a remote without being asked.
+- `main` is committed and published: `origin` is
+  `git@github.com:eschnett/TreeWave.jl.git`, and `main` tracks it. Work on a
+  branch; do not push, open a pull request, or merge to `main` without being
+  asked.
