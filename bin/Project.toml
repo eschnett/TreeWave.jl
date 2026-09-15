@@ -6,6 +6,7 @@
 
 [deps]
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
 SixelTerm = "65edfddc-f399-4499-8369-a1bd38eee2ea"
 TreeAMR = "91bc416d-811c-44c1-9bc4-b9c8bbdbbd08"
 TreeWave = "6acacbb1-3a21-4f63-beb8-8f5fda648e50"

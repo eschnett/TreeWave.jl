@@ -1,4 +1,4 @@
-# Thread-scaling measurement (M5).
+# Thread-scaling (M5) and device (M6) measurement.
 #
 #     julia -t N --project=. bin/benchmark.jl
 #
@@ -14,8 +14,27 @@
 #
 # The sizes are flags rather than constants because the same script has
 # to serve a laptop and a 64-core node.
+#
+# `--backend=cuda` or `--backend=metal` runs the same phases on a device,
+# in the same format, so a device column and a host column can be read
+# side by side. The device package is *not* a dependency of TreeWave --
+# neither CUDA nor Metal is a dependency of TreeAMR either, and the
+# cluster should not have to build one to time a Laplacian -- so the
+# script needs an environment that has it, which is one command to make:
+#
+#     julia --project=/tmp/twgpu -e 'using Pkg; Pkg.develop(path = ".");
+#                                     Pkg.add("Metal")'
+#     julia --project=/tmp/twgpu bin/benchmark.jl --backend=metal --type=f32
+#
+# `--type=f32` is not optional on a device without hardware fp64: a
+# `Float64` field set is refused there, with the reason. See "Running on a
+# device" in `CODE.md`.
 
 using TreeWave
+
+include(joinpath(@__DIR__, "backend.jl"))
+
+const FLOATTYPES = Dict("f32" => Float32, "f64" => Float64)
 
 function main(args)
     dim = 2
@@ -37,6 +56,8 @@ function main(args)
     driver = false
     driver_roots = 16
     driver_n = 16
+    T = Float64
+    backendname = "cpu"
     for a in args
         if startswith(a, "--dim=")
             dim = parse(Int, a[7:end])
@@ -54,49 +75,64 @@ function main(args)
             driver_roots = parse(Int, a[16:end])
         elseif startswith(a, "--driver-n=")
             driver_n = parse(Int, a[12:end])
+        elseif startswith(a, "--type=")
+            tag = a[8:end]
+            haskey(FLOATTYPES, tag) ||
+                error("unknown --type=$tag; expected f32 or f64")
+            T = FLOATTYPES[tag]
+        elseif startswith(a, "--backend=")
+            backendname = a[11:end]
         elseif a == "--driver"
             driver = true
         elseif a == "--no-driver"
             driver = false
         else
             error("unknown argument $a; expected --dim=, --n=, --roots=, \
-                   --reps=, --steps=, --sigma=, --driver, --no-driver, \
-                   --driver-roots=, --driver-n=")
+                   --reps=, --steps=, --sigma=, --type=, --backend=, \
+                   --driver, --no-driver, --driver-roots=, --driver-n=")
         end
     end
     dim in (1, 2, 3) || error("--dim must be 1, 2 or 3; got $dim")
 
     threads = Threads.nthreads()
-    result = benchmark_phases(Val(dim); N=n, roots=roots, reps=reps, steps=steps,
-                              σ=σ)
-    s = result.sizes
-    println("# threads=", threads, " D=", s.D, " N=", s.N, " roots=", s.roots,
-            " blocks=", s.blocks, " cells=", s.cells,
-            " work=", round(s.workbytes / 2^20; digits=1), "MiB")
-    for (name, seconds) in result.timings
-        println(threads, "\t", name, "\t", round(seconds; sigdigits=4))
-    end
+    # Everything that touches the storage runs inside `withbackend`, which
+    # is what makes a device package loaded a moment ago visible to it.
+    return withbackend(backendname, T) do backend
+        result = benchmark_phases(T, Val(dim); N=n, roots=roots, reps=reps,
+                                  steps=steps, σ=T(σ), backend=backend)
+        s = result.sizes
+        println("# threads=", threads, " type=", s.floattype,
+                " backend=", s.backend, " D=", s.D, " N=", s.N,
+                " roots=", s.roots, " blocks=", s.blocks, " cells=", s.cells,
+                " work=", round(s.workbytes / 2^20; digits=1), "MiB")
+        for (name, seconds) in result.timings
+            println(threads, "\t", name, "\t", round(seconds; sigdigits=4))
+        end
 
-    # Cell updates per second of the whole step, which is the throughput
-    # an application would quote -- four RHS evaluations and the stage
-    # arithmetic included, not the kernel alone.
-    step = first(t for (name, t) in result.timings if name == "step")
-    println(threads, "\tcell_updates_per_second\t",
-            round(s.cells / step; sigdigits=4))
+        # Cell updates per second of the whole step, which is the throughput
+        # an application would quote -- four RHS evaluations and the stage
+        # arithmetic included, not the kernel alone.
+        step = first(t for (name, t) in result.timings if name == "step")
+        println(threads, "\tcell_updates_per_second\t",
+                round(s.cells / step; sigdigits=4))
 
-    if driver
-        # The calibrated run has sigma/h0 = 5.12 at roots = N = 8; holding
-        # that ratio is what makes a bigger run a bigger *hierarchy*
-        # rather than a finer mesh the criterion declines to refine.
-        h0 = 1.0 / (driver_roots * driver_n)
-        run = benchmark_driver(; roots=driver_roots, N=driver_n, σ=5.12 * h0,
-                               chunk=0.01, t_end=0.05, reps=2)
-        println(threads, "\ttrack_blast\t", round(run.seconds; sigdigits=4))
-        println("# track_blast roots=", driver_roots, " N=", driver_n,
-                " blocks=", run.nblocks, " growth=", round(run.growth; digits=2),
-                " worst=", round(run.worst; sigdigits=4))
+        if driver
+            # The calibrated run has sigma/h0 = 5.12 at roots = N = 8;
+            # holding that ratio is what makes a bigger run a bigger
+            # *hierarchy* rather than a finer mesh the criterion declines
+            # to refine.
+            h0 = 1.0 / (driver_roots * driver_n)
+            run = benchmark_driver(T; roots=driver_roots, N=driver_n,
+                                   σ=5.12 * h0, chunk=0.01, t_end=0.05,
+                                   reps=2, backend=backend)
+            println(threads, "\ttrack_blast\t", round(run.seconds; sigdigits=4))
+            println("# track_blast roots=", driver_roots, " N=", driver_n,
+                    " blocks=", run.nblocks,
+                    " growth=", round(run.growth; digits=2),
+                    " worst=", round(run.worst; sigdigits=4))
+        end
+        return nothing
     end
-    return nothing
 end
 
 abspath(PROGRAM_FILE) == abspath(@__FILE__) && main(ARGS)

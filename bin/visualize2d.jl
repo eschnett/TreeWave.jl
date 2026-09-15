@@ -6,6 +6,7 @@
 #     julia --project=bin bin/visualize2d.jl
 #     julia --project=bin bin/visualize2d.jl --frozen-scales --out=/tmp
 #     julia --project=bin bin/visualize2d.jl --type=f32
+#     julia --project=bin bin/visualize2d.jl --backend=metal --type=f32
 #
 # A separate script from `visualize.jl` and not a `--dim=2` flag on it,
 # because nothing transfers: that viewer draws one line per block against
@@ -45,6 +46,8 @@ using SixelTerm
 using TreeAMR
 using TreeWave
 
+include(joinpath(@__DIR__, "backend.jl"))
+
 # `type="png"` is not just a default worth keeping. CairoMakie's fast
 # image path -- the one that pads each heatmap's edges so that abutting
 # blocks leave no hairline seam -- is disabled for vector output, where
@@ -74,8 +77,15 @@ This is also where the run's own floating-point type stops. A run may be
 `Float32`; everything below this point is a figure, and Makie is happiest
 given `Float64`, so the conversion happens once here rather than at every
 plot call.
+
+And where its *storage* stops: a run may be on a device, and both
+`interiorview` and `cell_indicator` read single cells. One `hostcopy`
+here and the figure code below does not have to know. Note that `scales`
+is measured by the caller from the field set as it really is -- that
+reduction runs on a device -- so the τ drawn is still the run's own.
 """
 function snapshot(fs, t, u; coarsen_tol, scales)
+    fs = hostcopy(fs)
     forest = fs.forest
     blocks = map(1:nblocks(fs)) do b
         k = blockkey(fs, b)
@@ -277,7 +287,7 @@ indicator refines the entire domain by the second frame.
 function blastcase(::Type{T}=Float64; N=8, L=one(T), roots=8, σ=T(2//25),
                   t_end=T(2//5), chunk=T(1//50), n=1, ops_order=4,
                   refine_tol=T(3//10), coarsen_tol=T(3//40),
-                  refresh_scales=true) where {T}
+                  refresh_scales=true, backend=CPU()) where {T}
     # G is set by the operator order, not chosen independently: TreeAMR
     # requires G >= prolongation/2 for point-value operators.
     G = ops_order ÷ 2
@@ -303,7 +313,8 @@ function blastcase(::Type{T}=Float64; N=8, L=one(T), roots=8, σ=T(2//25),
                                   restriction=ops_order),
                     t_end=t_end, chunk=chunk, refine_tol=refine_tol,
                     coarsen_tol=coarsen_tol,
-                    refresh_scales=refresh_scales, observer=observer)
+                    refresh_scales=refresh_scales, backend=backend,
+                    observer=observer)
     what = refresh_scales ? "refinement tracks it" :
            "amplitude scale frozen — the criterion refines everything"
     title = @sprintf("Radial blast wave, σ = %.3g, %s — %s\nworst L∞ = %.3g, \
@@ -336,6 +347,7 @@ function main(args)
     refresh_scales = true
     T = Float64
     typetag = ""
+    backendname = "cpu"
     # Sixel is for a human looking at a terminal; a pipe gets the paths.
     inline = stdout isa Base.TTY
     for a in args
@@ -353,6 +365,8 @@ function main(args)
             # The default type keeps the plain filename, so a Float32 render
             # never overwrites the figure CI checks.
             typetag = tag == "f64" ? "" : "_$tag"
+        elseif startswith(a, "--backend=")
+            backendname = a[11:end]
         elseif a == "--frozen-scales"
             refresh_scales = false
         elseif a == "--display"
@@ -361,13 +375,20 @@ function main(args)
             inline = false
         else
             error("unknown argument $a; expected --out=, --n=, --ops=, \
-                   --type=, --frozen-scales, --display, --no-display")
+                   --type=, --backend=, --frozen-scales, --display, \
+                   --no-display")
         end
     end
 
     mkpath(outdir)
     @info "running the blast case"
-    c = blastcase(T; n=n, ops_order=ops_order, refresh_scales=refresh_scales)
+    # The run is what touches the storage; `withbackend` is what makes a
+    # device package loaded a moment ago visible to it. Everything below
+    # is a figure, drawn from the host copies `snapshot` already took.
+    c = withbackend(backendname, T) do backend
+        blastcase(T; n=n, ops_order=ops_order, refresh_scales=refresh_scales,
+                  backend=backend)
+    end
     fig = makefigure(c.snaps, c.profile, c.L, c.x₀, c.title; tols=c.tols,
                      tracking=c.tracking)
     path = joinpath(outdir,

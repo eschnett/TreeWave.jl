@@ -33,6 +33,26 @@ own subprocess either way):
 julia --project=. -e 'using Pkg; Pkg.test(; julia_args = ["--threads=4"])'
 ```
 
+Run anything on a GPU. No device package is a dependency of this package
+or of TreeAMR, so this needs an environment of its own -- once, then
+reuse it:
+
+```bash
+julia --project=/tmp/twgpu -e 'using Pkg; Pkg.develop(path=".")
+    Pkg.add(url="https://github.com/eschnett/TreeAMR.jl", rev="main")
+    Pkg.add(["Metal", "KernelAbstractions", "MultiFloats",
+             "OrdinaryDiffEqLowOrderRK", "SciMLBase", "SpecialFunctions",
+             "Test"])'
+TREEWAVE_TEST_BACKEND=metal julia --project=/tmp/twgpu test/runtests.jl
+julia --project=/tmp/twgpu bin/benchmark.jl --backend=metal --type=f32
+```
+
+`TREEWAVE_TEST_BACKEND` unset runs `test/device_tests.jl` on the CPU
+backend, which is what CI does and is where the criterion-equivalence
+test lives. The viewers need CairoMakie too, so they want a second such
+environment rather than `bin/` (whose `Project.toml` is tracked and must
+not gain a device dependency).
+
 Thread scaling (`bin/benchmark.jl`, swept by `bin/benchmark.sbatch`,
 which is both a batch job and an ordinary shell script). Note the
 `--project=.`: this is the one script in `bin/` that does *not* use the
@@ -47,7 +67,8 @@ The full suite takes about 60 seconds, of which the thread-independence
 test is 10 -- it runs `test/thread_workload.jl` in a subprocess, which
 pays Julia's startup and `OrdinaryDiffEq`'s load time again. The other
 slow parts are the type tests, the two convergence sweeps and the 3D
-smoke test; the pulse test is about 5 s.
+smoke test; the pulse test is about 5 s and the device tests about 8,
+nearly all of it compiling the two firing kernels.
 
 ## Things that have bitten before
 
@@ -121,6 +142,38 @@ smoke test; the pulse test is about 5 s.
   initial-data closure would nest one parallel loop inside another.
   `field_scales` is safe only because it is evaluated at `refine_flags`'
   own call site, outside the flagging pass; keep it that way.
+- **A callback must capture no `Type` and no host array.** Every
+  initial-data, boundary and flagging callback becomes a kernel argument,
+  so everything it closes over must be `isbits`. `zero(T)` inside a
+  closure whose `T` is a *local* puts a `Type` in a kernel argument;
+  write `zero(x[1])`. A captured `Vector` must become a device array
+  (`to_backend`) or a tuple -- which is why `cell_tau` takes tuples and
+  `blast_exact` uploads its two profiles. Generators are the quiet
+  version of the same problem: `prod(… for d in 1:D)` was replaced by an
+  accumulating loop, which is the shape TreeAMR's own device-tested
+  closures use.
+- **A schedule belongs to the field set's backend, and a regrid rebuilds
+  it.** `GhostSchedule(forest, ops)` after a `regrid!` builds a *host*
+  schedule whose stencils the transfer kernel cannot read; pass
+  `T=T, backend=backend` at every rebuild, not only at construction. The
+  error is good ("the wrong memory") but it arrives a chunk later.
+- **Loading a device package inside `main` is a world-age bug**, and it
+  has two symptoms, not one. `allocate` falls through to
+  KernelAbstractions' generic method and throws a `MethodError` naming a
+  method the same message lists as a candidate -- that one is loud.
+  `supports_float64` falls through to the generic `true`, which is
+  *silent*: the `--type=f64 --backend=metal` guard passed and the
+  objection arrived from the mesh instead. `bin/backend.jl`'s
+  `withbackend` puts the check and the work inside one `invokelatest`;
+  use it rather than calling `resolvebackend` and carrying on.
+- **The mesh sizes the tests use are two orders of magnitude too small
+  for a GPU.** A whole `track_blast` is 7× *slower* on Metal at 52k
+  cells. That is launch overhead, not a regression: measure phases at
+  `--n=128 --roots=32` (29.4M cells), which is what `CODE.md` records.
+- **`TreeAMR.block_partials` is unexported.** It is the one internal this
+  package uses, deliberately and recorded in `CODE.md`'s goals. If
+  upstream renames it, `field_scales`, `blast_coverage` and
+  `track_pulse`'s tracking measure all break at once.
 - **`julia -t N` asks for `N + 1` threads.** The interactive thread is
   added on top of the count given, so with `JULIA_EXCLUSIVE=1` pinning one
   thread per core, `-t 64` on a 64-core node dies with "Too many threads
@@ -163,6 +216,10 @@ Match TreeAMR's style, since the two are read together:
 - **`bin/` has its own Manifest**, so `Pkg.update("TreeAMR")` in the root does
   not touch it. After a TreeAMR change, update both or the viewer fails with a
   `MethodError` on an API the tests are already using.
+- **`bin/backend.jl` is `include`d by all three scripts in `bin/`**, two of
+  which run against `bin/Project.toml` and one against the root project. So
+  it may use only what *both* environments have -- today that is
+  `KernelAbstractions`, which is why it was added to `bin/Project.toml`.
 - `bin/output/` is gitignored; the viewer writes PNGs there.
 - **`bin/benchmark.jl` is the one script in `bin/` that runs against the
   root project**, not `bin/Project.toml`: it needs no CairoMakie, and

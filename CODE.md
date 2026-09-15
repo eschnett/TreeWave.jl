@@ -12,12 +12,18 @@ application.
 
 - Show the whole path from mesh to solution: initial data, right-hand
   side, time integration, regridding, error measurement, visualization.
-- Use only TreeAMR's public API. Nothing here reaches into TreeAMR's
-  internals, and nothing here is mesh machinery that belongs upstream.
+- Use TreeAMR's public API. Nothing here is mesh machinery that belongs
+  upstream, and there is exactly **one** exception to the "no internals"
+  rule, recorded rather than quietly taken: `TreeAMR.block_partials`, the
+  per-block reduction every diagnostic upstream is built on, which is
+  unexported and ought not to be. See
+  [Running on a device](#running-on-a-device).
 - Be small enough to read in one sitting.
 - Run in the caller's floating-point type, not only `Float64` — TreeAMR's
   mesh is generic and an application that is not would give the genericity
   nowhere to go. See Precision.
+- Run where the caller's storage is, not only on the host — same argument,
+  one milestone later. See Running on a device.
 
 ## Scope and non-goals
 
@@ -239,6 +245,11 @@ follows it, so that a run can be done at `Float32` — the point being test runs
 on a device with no hardware fp64, which is exactly what a low-end GPU is —
 or at a MultiFloats type, which is a software float and therefore evidence
 that no fp64 path is load-bearing anywhere.
+
+That first reason stopped being hypothetical: the mesh refuses a `Float64`
+field set on a backend without hardware fp64, so `Float32` is not a
+reduced-precision option on such a device but the only one there is. See
+[Running on a device](#running-on-a-device).
 
 Every driver takes the type as a **leading positional argument**, spelled as
 TreeAMR spells `spacing(T, forest, level)`:
@@ -506,10 +517,11 @@ function given to `flag_blocks`, which is where the Löhner sweep of
 [`cell_indicator`](src/refinement.jl) runs. Both were parallelized by
 updating the dependency and changing nothing.
 
-That also made the package ready for TreeAMR's M6 without a line
-changing: its initial data already runs inside a kernel that reaches the
-geometry through per-block `block_origins`/`block_spacings` arrays rather
-than through the tree, which is the shape a device demands.
+That also made the package most of the way ready for TreeAMR's M6: its
+initial data already ran inside a kernel that reaches the geometry
+through per-block `block_origins`/`block_spacings` arrays rather than
+through the tree, which is the shape a device demands. What was left, and
+what it cost, is [Running on a device](#running-on-a-device).
 
 ### The callbacks are called concurrently, so they must be pure
 
@@ -532,9 +544,18 @@ Four loops here were reached by none of the above, and they were measured
 before they were touched — 0.98×, 1.01× and 0.98× at eight threads for
 the three the benchmark already covered, which is the flat line a serial
 loop should give and the check that the benchmark reads what it claims
-to. Each is now written the way upstream writes its own: one slot per
+to. Each was then written the way upstream writes its own: one slot per
 block (or column, or radius), combined afterwards in a fixed order, never
 an accumulator shared between tasks.
+
+Two of the four have since gone back upstream. `field_scales` and
+`blast_coverage` were per-block reductions over field data, which is
+exactly what `TreeAMR.block_partials` is, and a per-block reduction over
+field data is the one shape that has to change on a device. They now call
+it and the discipline above is upstream's to keep; the two that remain
+here are the Hankel table and its contraction, which are host `Float64`
+tables and not field data at all. See
+[Running on a device](#running-on-a-device).
 
 **The Hankel contraction is the instructive one.** Its natural outer loop
 is over modes, and that loop cannot be split: every `k` contributes to
@@ -646,6 +667,233 @@ and the last two more than linear, which is what happens when one thread's
 working set is limited by one NUMA domain's bandwidth and 64 threads'
 is not.
 
+## Running on a device
+
+There is no switch here either. TreeAMR's M6 makes the *storage* decide:
+`backend` is a keyword on `FieldSet` and `GhostSchedule` and on nothing
+else, after which `statevector` allocates where the field set lives,
+`regrid!` reallocates there, and every kernel takes its backend from the
+array it is handed. Every driver therefore takes `backend` alongside its
+`T`, defaulting to `CPU()`:
+
+    track_blast(Float32, Val(2); backend = MetalBackend())
+    wave_errors(Float32, Val(1); N = 16, G = 2, ops = ops, backend = CUDABackend())
+
+`T` and `backend` travel together because on a device they are not
+independent: a `Float64` field set on a backend without hardware fp64 is
+refused at construction, with the reason. That is what
+[Precision](#precision) was *for*, and the order the two milestones were
+done in was not arbitrary — a device port on top of a `Float64`-only
+application would have been a rewrite rather than a keyword, and the
+`Float32` work was where the stray `Float64` literals were found while
+they were still cheap to find.
+
+No device package becomes a dependency. Neither CUDA nor Metal is a
+dependency of TreeAMR, `KernelAbstractions.allocate` is the whole of the
+interface, and this package adds nothing to that. What needs one is the
+caller: the scripts in `bin/` load it on demand (see `bin/backend.jl`)
+and the device tests are opt-in behind an environment variable.
+
+Loading it on demand has one trap worth recording, because it cost time
+and because *anything* that resolves a backend from a command-line flag
+will hit it. A `using` issued from inside a running function adds methods
+to a later world, so every dispatch on the new backend type still
+resolves to whatever generic method KernelAbstractions defines:
+`allocate` throws a `MethodError` naming a method the same message lists
+as a candidate, and `supports_float64` quietly answers `true`, so a
+`--type=f64` guard passes and the mesh raises the objection instead.
+`bin/backend.jl` therefore hands the work to `invokelatest` — the check
+and the run together, not the run alone.
+
+### What an application has to do that the mesh does not
+
+Four things in this package reached into block storage from the host, and
+they are the whole of the port.
+
+**The RHS kernel reads a spacing per block.** That array is the one piece
+of geometry the kernel needs and the one thing the mesh does not place for
+the application: `block_spacings` returns a host `Vector`, and
+[`WaveProblem`](src/evolution.jl) uploads it to the field set's backend
+when it is built. `to_backend` in [`src/device.jl`](src/device.jl) is six
+lines and is deliberately not `TreeAMR.todevice` — this package stands
+for a downstream user of the public API, and the point is that an
+application needs nothing privileged. **The RHS kernel itself did not
+change**, which is the argument for having written it as a kernel in the
+first place.
+
+**The refinement criterion walked cells on the host.** This is the one
+that needed a second implementation, because `flag_blocks` calls
+`f(b, key)` on the host and a realistic criterion reads its block's data.
+`firing_boxes` is the device form: the mesh evaluates a per-cell predicate
+over every block in one kernel and returns each block's firing-cell count
+and bounding box, and the application turns that into flags. See below.
+
+**Three diagnostics were per-block reductions over field data.**
+`field_scales`, [`blast_coverage`](src/blast.jl) and `track_pulse`'s
+tracking measure now go through `TreeAMR.block_partials` — threaded host
+views on the CPU, one kernel work item per block otherwise, host partials
+combined in block order either way. It is the one **unexported** upstream
+name this package uses, and it is used rather than reimplemented because
+a second copy of a determinism argument is a second thing to get wrong;
+it deserves to be exported and that is a request to make upstream. What
+stayed here is the part that needs the *tree* — which blocks are refined,
+which are at the finest level — reducing one number per block.
+
+**One callback closed over arrays.** [`blast_exact`](src/blast.jl) closes
+over the two radial profiles of the Hankel table, so on a device they are
+converted to `T` and uploaded once per error measurement. The table
+itself stays a host `Float64` object, which was already the design (see
+[Precision](#precision)) and is now load-bearing rather than tidy.
+
+### Callbacks become kernel arguments
+
+Everything a callback captures must be `isbits`, and a captured **`Type`**
+is the trip. `zero(T)` inside a closure whose `T` is a local variable puts
+a `Type` in a kernel argument; `zero(x[1])` reads the type off the
+coordinate the mesh already handed over. Where a `Vector` was captured it
+becomes a device array or a tuple. And two generators —
+`prod(… for d in 1:D)` in `wave_exact` and `sum(d -> …, 1:D)` in
+`blast_initial` — became accumulating loops, the shape TreeAMR's own
+device-tested closures use; multiplying by one and adding zero are exact,
+so no recorded number moved.
+
+This is the same purity requirement the concurrent callbacks of
+[Multi-threading](#multi-threading) already imposed, tightened: a closure
+that was merely *racy* on threads does not compile at all for a device,
+which is the better failure.
+
+### The criterion has two forms, and keeps both
+
+[`refine_flags`](src/refinement.jl) dispatches on `get_backend(fs)`: the
+host loop over cells on the CPU, `firing_flags` — built on
+`firing_boxes` — on a device. The choice lives there so that no *driver*
+has to make it: a driver passes `backend` to its field set and its
+schedule and then calls `refine_flags`, and nothing in between knows
+which form ran.
+
+The host form is kept rather than retired in favour of the one that runs
+everywhere, and not out of caution:
+
+- it returns `τmax`, which the 2D viewer draws and
+  `test/refinement_tests.jl` makes claims about, where a firing count
+  does not;
+- it is what every number recorded under
+  [Measured results](#measured-results) was taken with;
+- it is the readable statement of the criterion; and
+- it is what the device form is **tested against**. Both are available on
+  the CPU backend, so `test/device_tests.jl` compares them there, flag
+  for flag and box for box, on pulse data and on blast data and at two
+  caps. Nothing else in the suite would catch a drift: a device run that
+  flagged differently would still run, and would merely build a different
+  mesh.
+
+The two share their arithmetic — one `cell_tau`, whose argument list is
+not this package's choice but exactly what `firing_boxes` hands a
+predicate — so what is duplicated is the walk over cells, not the
+criterion.
+
+**The device form needs two sweeps, because the criterion has two
+thresholds.** A firing count answers one yes-or-no question per block and
+[`refine_mark`](src/refinement.jl) asks two: is any cell above
+`refine_tol` (a count of zero is exactly `τmax ≤ refine_tol`, since the
+count is over cells and `τmax` is their maximum), and where are the cells
+above `coarsen_tol`. The second is not recoverable from the first, so the
+cells are walked twice. That is the cost of the form, paid once per
+regrid against an evolution of many steps, and it still measures faster
+than the host loop.
+
+### What stays on the host, and why that is not a gap
+
+- **The tree.** It is the mesh's own bookkeeping, and upstream keeps it on
+  the host; `regrid!` completes marks and rebuilds the leaf array there.
+- **The Hankel quadrature.** `besselj0` has hardware-float methods only,
+  and a reference table is the last thing worth uploading as fp64. It is
+  four million Bessel evaluations once per run against an evolution of
+  thousands of steps, and it is the most favourable shape a *threaded*
+  loop can have — which is where it already is.
+- **The viewer.** CairoMakie is host code and reads single cells.
+  `hostcopy` brings a field set down in one call at the top of each
+  `snapshot`, and no line of figure code below it knows the difference.
+  That is for a consumer that *cannot* move, not one that has not been
+  moved: the numeric diagnostics deliberately do not work this way,
+  because a copy of the whole state per chunk is hundreds of megabytes on
+  a run worth putting on a device at all.
+
+### What it buys on this hardware, and what it does not
+
+Measured on an Apple M3 Pro — 12 CPU cores, 18 GPU cores, unified memory
+— at `Float32`, on the same two-level 2D mesh the thread scaling uses:
+**1792 blocks of 128², 29.4M cells**, a 238 MB working array. The host
+column is the same machine at eight threads, so this is a device against
+a *threaded* host and not against a serial one.
+
+| phase | CPU, 1 thread | CPU, 8 threads | Metal | Metal vs CPU 8t |
+|---|---|---|---|---|
+| `step` (one RK4 step) | 0.836 | 0.348 | 0.340 | 1.0× |
+| `rhs` | 0.182 | 0.0484 | 0.0539 | **0.9×** |
+| `stage_broadcast` | 0.0154 | 0.0235 | 0.0161 | 1.5× |
+| `initial_data` | 1.546 | 0.344 | 0.0432 | **8.0×** |
+| `blast_exact` | 0.990 | 0.273 | 0.0702 | 3.9× |
+| `refine_flags` | 0.996 | 0.413 | 0.152 | 2.7× |
+| `field_scales` | 0.0675 | 0.0187 | 0.0154 | 1.2× |
+| `blast_coverage` | 0.0676 | 0.0194 | 0.0151 | 1.3× |
+| `blast_reference` | 0.596 | 0.151 | 0.182 | host |
+| `blast_radial_table` | 0.0011 | 0.0025 | 0.0021 | host |
+
+Seconds; the minimum of three, each synchronized. Read it as two
+populations:
+
+**The compute-bound callbacks win, by 3–8×.** `initial_data` and
+`blast_exact` do real arithmetic per cell — an `exp` and integer powers,
+or nine periodic images and two interpolations — and that is what a GPU
+is for. `refine_flags` wins 2.7× *despite* walking every cell twice, so
+the two-sweep form of the criterion is not what holds it back; what does
+is upstream's deliberate one-work-item-per-block reduction, which
+TreeAMR measures at 5.5× for a single `firing_boxes` and explains as the
+price of determinism.
+
+The three per-block reductions — `field_scales`, `blast_coverage` and
+the norms — are the flat rows for that same reason, 1.2–1.3×. None is on
+the per-evaluation path.
+
+**The bandwidth-bound kernels do not, and cannot on this machine.** The
+RHS is a 3-point stencil per dimension: in 2D six reads and two writes
+per cell, with almost no arithmetic between them. On Apple silicon the
+CPU and the GPU share one memory controller, so there is no bandwidth
+ratio to win — and measured, there is none: 0.9×. That is not a finding
+about the code. TreeAMR measured **35.5×** on this same RHS on an H200
+against 16 host cores, against a triad bandwidth ratio of 18.7; the
+number here is what the same code does when the ratio is 1. A
+memory-bound kernel moves to a device to get its memory, and on unified
+memory it is already there.
+
+`stage_broadcast` is the one row worth a second look: 8 host threads are
+*slower* than one (0.0235 against 0.0154) because five state-sized
+streams saturate the bus, which is the same ceiling
+[Multi-threading](#multi-threading) measures as 84% of a 64-thread step.
+The device does it in 0.0161 — still not a win, and for the same reason.
+
+**And a whole adaptive run is slower, by design of the problem and not of
+the code.** `track_blast` at the calibrated size — 820 blocks of 8², 52k
+cells — takes 5.2 s on eight host threads and 35.8 s on Metal; at
+`roots = 16, N = 16` (400 blocks of 16², 102k cells) the gap narrows to
+0.60 s against 2.10 s. A run that small is launch-bound: an RK4 step is
+four RHS evaluations, each a scatter, several ghost phases and a kernel,
+each synchronized, over blocks of 64 cells. The phase table above is at
+29.4M cells for exactly this reason, and the honest summary is that the
+mesh sizes this package's *tests* use are two orders of magnitude below
+where a device begins to pay.
+
+### Reproducing it
+
+`bin/benchmark.jl --backend=metal --type=f32` prints the table in the
+format `--backend=cpu` prints, so the two can be diffed. The device
+package must be in the environment the script is run against, which is
+one command and is in the script's header — the package environment
+deliberately does not have it. Both viewers take `--backend=` too, and
+that is the quickest way to see that a device run is the *same run*:
+same blocks, same levels, same τ, the same figure.
+
 ## Watching a run: the `observer` keyword
 
 `wave_errors` and `track_pulse` return summary numbers, which is what the
@@ -665,6 +913,7 @@ already three near-identical time-stepping loops in `src/`; a fourth in
 |---|---|
 | `src/TreeWave.jl` | module shell: `using`s, exports, includes |
 | `src/precision.jl` | the `Base` operations a software float type does not provide, bridged — see Precision |
+| `src/device.jl` | placing an application's own arrays on a backend, and bringing a field set back to the host — see Running on a device |
 | `src/evolution.jl` | the RHS kernel, `WaveProblem`, `wave_rhs!`, `convergence_rate` |
 | `src/refinement.jl` | the per-cell refinement indicator and its reduction to block marks |
 | `src/sinewave.jl` | the standing mode and its convergence driver |
@@ -677,11 +926,13 @@ already three near-identical time-stepping loops in `src/`; a fourth in
 | `test/blast_tests.jl` | the exact ring, 2nd-order convergence to it, a growing refined region, and what a frozen amplitude scale costs |
 | `test/type_tests.jl` | the drivers at `Float32` and at MultiFloats' `Float32x2` — see Precision |
 | `test/threading_tests.jl` | the answer does not move with the thread count |
+| `test/device_tests.jl` | the two forms of the criterion agree, the geometry follows the storage, and — with a device — a whole run reproduces the host run |
 | `test/thread_workload.jl` | not a test: the standalone run whose digests the above compares across thread counts |
 | `bin/visualize.jl` | CairoMakie viewer for the 1D cases (own environment; see `bin/Project.toml`) |
 | `bin/visualize2d.jl` | CairoMakie viewer for the blast wave — a different figure, not a flag on the other one |
 | `bin/benchmark.jl` | the benchmark's CLI — the one script in `bin/` that uses the *package* environment, since it needs no CairoMakie |
 | `bin/benchmark.sbatch` | the thread and page-placement sweep; a SLURM job and an ordinary shell script at once |
+| `bin/backend.jl` | `--backend=`, shared by all three scripts: loads a device package on demand and runs the work in the world that load created |
 | `.github/workflows/CI.yml` | tests on a Julia matrix, at one thread and at four, plus a job that renders the figures |
 
 `bin/visualize.jl` draws four panels per 1D case — the solution, the
@@ -692,7 +943,9 @@ quickest way to see the interface-order rule rather than read about it.
 `--type=f32` reruns in single precision, which is the quickest way to see
 that it is the *same run* — same blocks, same levels, same τ — rather than
 read that either. Both viewers take it; only the two hardware types are
-offered, because Makie cannot plot a MultiFloat.
+offered, because Makie cannot plot a MultiFloat. `--backend=metal` (or
+`cuda`) makes the same argument about the *storage*, and needs
+`--type=f32` on a device without hardware fp64.
 
 `bin/visualize2d.jl` is a separate script and not a `--dim=2` flag,
 because nothing transfers: a line per block against `x` is not a worse
@@ -731,6 +984,15 @@ exists because `bin/` carries its own environment and therefore its own copy
 of the TreeAMR dependency: during development that let the viewer keep
 building against an older TreeAMR than the tests, until it failed on an API
 the tests were already using. Nothing in the test job could have caught that.
+
+**No CI runner has a GPU**, so `test/device_tests.jl` runs there on the
+CPU backend, which needs no device package and is the default. That is
+less of a gap than it sounds, because the assertion most worth guarding
+is the one that needs no device: the two forms of the refinement
+criterion must agree, and both are available on the CPU backend. What CI
+cannot check is that a device run *works* — for that, add a device
+package to an environment of your own and set `TREEWAVE_TEST_BACKEND`;
+see [Running on a device](#running-on-a-device).
 
 Julia 1.11 is the floor, and not by preference: TreeAMR is unregistered, so
 `Project.toml` locates it with a `[sources]` entry, which 1.11 introduced.
@@ -846,6 +1108,28 @@ than as a test that merely still passes.
 - Results are **bit-identical** across thread counts — every digit of
   every digest in `test/thread_workload.jl`, at 1 and at 4 threads, on
   both a full pulse run and a full blast run.
+- On a device (Apple M3 Pro, Metal, `Float32`), the same three runs reach
+  the **same mesh** as the host does, to the last digit of every mesh
+  number: the pulse 16 blocks at level 2 with the peak never leaving a
+  refined block, the blast wave 136 → 820 blocks (×6.029411764705882) at
+  level 2 with 0.9109663409337676 of the ring at the finest level — the
+  identical fraction, not a close one, because the criterion's decisions
+  are threshold comparisons on per-cell arithmetic that is the same on
+  both. The errors agree to about 1e-4 relative (pulse L∞ 0.09687 against
+  0.09703, blast 0.029778 against 0.029781), which is the per-block
+  summation order inside `volume_weighted_norm` — pairwise on the host,
+  sequential in the kernel — and not anything else.
+- Per-phase device against host on that machine, at 29.4M cells: **8.0×
+  on initial data, 3.9× on the exact ring, 2.7× on the refinement
+  criterion, 0.9× on the RHS**. The table and the reason the last number
+  is what it is — one memory controller shared by CPU and GPU, so no
+  bandwidth ratio to win, against TreeAMR's 35× on an H200 whose ratio is
+  19× — are under [Running on a device](#running-on-a-device).
+- A whole adaptive run on that device is **slower** at the sizes this
+  package's tests use: `track_blast` 5.2 s on eight host threads against
+  35.8 s on Metal at 52k cells, 0.60 s against 2.10 s at 102k. Launch
+  overhead over blocks of 64 cells, and recorded because it is the first
+  thing anyone will measure.
 
 ## Possible extensions
 
@@ -861,4 +1145,11 @@ Not planned, listed because they are the obvious next questions:
   version of this — `RK4(thread = True())`, which threads the same
   broadcasts through Polyester — is measured there and is *worse*, so the
   extension is a real one: the stage updates have to join the pool that
-  is already running, not start a second.
+  is already running, not start a second. On a device the same term is
+  the one phase that never leaves the host's control flow, and it is
+  measured in [Running on a device](#running-on-a-device) as bandwidth
+  bound on both.
+- An adaptive run large enough for a device to pay for itself. The phase
+  table shows where that is; what stands in the way is not the code but
+  the calibration — `σ / h₀` has to be held fixed and the regrid cadence
+  with it, which is the same constraint `benchmark_driver` documents.

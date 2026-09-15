@@ -7,6 +7,7 @@
 #     julia --project=bin bin/visualize.jl --case=pulse --n=2 --out=/tmp
 #     julia --project=bin bin/visualize.jl --case=sine --ops=2
 #     julia --project=bin bin/visualize.jl --type=f32
+#     julia --project=bin bin/visualize.jl --backend=metal --type=f32
 #
 # The figures are written as PNGs and, when stdout is a terminal, also
 # drawn inline via SixelTerm. Piped or redirected output skips the inline
@@ -37,6 +38,8 @@ using Printf
 using SixelTerm
 using TreeAMR
 using TreeWave
+
+include(joinpath(@__DIR__, "backend.jl"))
 
 CairoMakie.activate!(; type="png", px_per_unit=2)
 
@@ -71,8 +74,16 @@ This is also where the run's own floating-point type stops: a run may be
 reaches the figure is converted here rather than at a dozen plot calls. The
 *evaluation* above it stays in the run's type -- `exactf` is handed `x` as
 the mesh produced it.
+
+And it is where the run's *storage* stops, for the same reason: a run may
+be on a device, every line below reads single cells, and Makie is host
+code by nature. One `hostcopy` here buys that and nothing else in the
+figure code has to know. `u` comes down with it, because the norms below
+are taken against the host field set.
 """
 function snapshot(fs, t, u, exactf)
+    fs = hostcopy(fs)
+    u = Array(u)
     forest = fs.forest
     G, N = forest.G, forest.N
 
@@ -213,7 +224,7 @@ period `cos(ωT) = 0`, so `u` itself vanishes and the solution panel would
 show nothing but the error again.
 """
 function sinecase(::Type{T}=Float64; D=1, N=16, L=one(T), m=1, roots=4,
-                 periods=T(9//10), ops_order=4) where {T}
+                 periods=T(9//10), ops_order=4, backend=CPU()) where {T}
     # G is set by the operator order, not chosen independently: TreeAMR
     # requires G >= prolongation/2 for point-value operators.
     G = ops_order ÷ 2
@@ -223,7 +234,7 @@ function sinecase(::Type{T}=Float64; D=1, N=16, L=one(T), m=1, roots=4,
     r = wave_errors(T, Val(D); N=N, G=G, roots=roots, L=L, m=m, periods=periods,
                     ops=Operators(prolongation=ops_order,
                                   restriction=ops_order),
-                    observer=observer, nsnapshots=97)
+                    backend=backend, observer=observer, nsnapshots=97)
     title = @sprintf("Standing sine mode, m = %d — two-level mesh, order-%d \
                       operators, %s\nfinal L2 = %.3g, L∞ = %.3g at h = %.3g",
                      m, ops_order, T, r.l2, r.linf, r.h)
@@ -242,7 +253,8 @@ regrid costs.
 """
 function pulsecase(::Type{T}=Float64; D=1, N=8, L=one(T), roots=8, σ=T(2//25),
                   x0=T(1//4), n=1, t_end=T(1//2), chunk=T(1//50), ops_order=4,
-                  refine_tol=T(3//10), coarsen_tol=T(3//40)) where {T}
+                  refine_tol=T(3//10), coarsen_tol=T(3//40),
+                  backend=CPU()) where {T}
     G = ops_order ÷ 2
     snaps = []
     observer = (fs, t, u) -> push!(snaps, snapshot(fs, t, u,
@@ -251,7 +263,8 @@ function pulsecase(::Type{T}=Float64; D=1, N=8, L=one(T), roots=8, σ=T(2//25),
                     ops=Operators(prolongation=ops_order,
                                   restriction=ops_order),
                     t_end=t_end, chunk=chunk, refine_tol=refine_tol,
-                    coarsen_tol=coarsen_tol, observer=observer)
+                    coarsen_tol=coarsen_tol, backend=backend,
+                    observer=observer)
     title = @sprintf("Travelling super-Gaussian pulse, n = %d, σ = %.3g, %s — \
                       refinement tracks it\nworst L∞ = %.3g over the run, \
                       %d blocks at maxlevel %d",
@@ -277,6 +290,7 @@ function main(args)
     ops_order = 4
     T = Float64
     typetag = ""
+    backendname = "cpu"
     # Sixel is for a human looking at a terminal; a pipe gets the paths.
     inline = stdout isa Base.TTY
     for a in args
@@ -298,13 +312,16 @@ function main(args)
             # The default type keeps the plain filename, so a Float32 render
             # never overwrites the figure CI checks.
             typetag = tag == "f64" ? "" : "_$tag"
+        elseif startswith(a, "--backend=")
+            backendname = a[11:end]
         elseif a == "--display"
             inline = true
         elseif a == "--no-display"
             inline = false
         else
             error("unknown argument $a; expected --case=, --out=, --n=, \
-                   --ops=, --dim=, --type=, --display, --no-display")
+                   --ops=, --dim=, --type=, --backend=, --display, \
+                   --no-display")
         end
     end
     case in ("both", "sine", "pulse") ||
@@ -315,20 +332,27 @@ function main(args)
     dim == 1 || error("only --dim=1 is implemented; got $dim")
 
     mkpath(outdir)
-    written = String[]
-    for (name, build) in (("sine", () -> sinecase(T; D=dim,
-                                                  ops_order=ops_order)),
-                          ("pulse", () -> pulsecase(T; D=dim, n=n,
-                                                    ops_order=ops_order)))
-        (case == "both" || case == name) || continue
-        @info "running the $name case"
-        c = build()
-        fig = makefigure(c.snaps, c.exactf, c.L, c.title; tols=c.tols,
-                         steering=c.steering)
-        path = joinpath(outdir, "$(name)_$(dim)d$(typetag).png")
-        save(path, fig)
-        inline && display(fig)
-        push!(written, path)
+    # Everything that touches the storage runs inside `withbackend`, which
+    # is what makes a device package loaded a moment ago visible to it.
+    written = withbackend(backendname, T) do backend
+        paths = String[]
+        for (name, build) in (("sine", () -> sinecase(T; D=dim,
+                                                      ops_order=ops_order,
+                                                      backend=backend)),
+                              ("pulse", () -> pulsecase(T; D=dim, n=n,
+                                                        ops_order=ops_order,
+                                                        backend=backend)))
+            (case == "both" || case == name) || continue
+            @info "running the $name case"
+            c = build()
+            fig = makefigure(c.snaps, c.exactf, c.L, c.title; tols=c.tols,
+                             steering=c.steering)
+            path = joinpath(outdir, "$(name)_$(dim)d$(typetag).png")
+            save(path, fig)
+            inline && display(fig)
+            push!(paths, path)
+        end
+        paths
     end
     for p in written
         println("wrote $p")

@@ -35,6 +35,13 @@ end
     # rewritten to accumulate into shared state, this says so in
     # milliseconds and names the function, where the subprocess test says
     # only that two long outputs differ.
+    #
+    # Two of the four now reach the answer through TreeAMR's
+    # `block_partials` rather than through a loop here (see "Running on a
+    # device" in CODE.md), so for those this guards a *boundary*: the
+    # value has to stay the one the serial loop gave, whoever computes
+    # it, and an upstream change of summation order would show up here
+    # first.
     forest = wave_forest(Val(2), 8, 2; roots=4)
     fs = FieldSet(forest, 2)
     fill_by_coordinates!(pulse_exact(2, 1.0, 0.25, 0.08, 0.0), fs)

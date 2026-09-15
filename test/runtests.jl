@@ -14,4 +14,5 @@ using SpecialFunctions: besselj0
     include("supergaussian_tests.jl")
     include("blast_tests.jl")
     include("type_tests.jl")
+    include("device_tests.jl")
 end

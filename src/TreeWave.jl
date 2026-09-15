@@ -22,6 +22,11 @@ amplitude as it spreads, so the refinement criterion's fixed noise floor
 is put under real strain) in `blast.jl`. The refinement criterion that
 drives the adaptive runs is in `refinement.jl`.
 
+Every driver takes the floating-point type it computes in and the
+KernelAbstractions backend it runs on as its first two things to decide,
+so the same study runs at `Float32` on a GPU as at `Float64` on the host;
+see "Precision" and "Running on a device" in `CODE.md`.
+
 See `CODE.md` in the package root for the design document, and `bin/` for
 a CairoMakie viewer.
 """
@@ -29,10 +34,14 @@ module TreeWave
 
 using TreeAMR
 
-using KernelAbstractions: @kernel, @index, @Const
+using KernelAbstractions: @kernel, @index, @Const, Backend, CPU, get_backend,
+                          allocate, supports_float64, synchronize
 using OrdinaryDiffEqLowOrderRK: RK4
 using SciMLBase: ODEProblem, solve
 using SpecialFunctions: besselj0
+
+# Devices
+export hostcopy
 
 # Evolution system
 export WaveProblem, wave_rhs!, convergence_rate
@@ -49,12 +58,13 @@ export blast_initial, blast_reference, blast_radial_table, blast_exact,
 
 # Refinement criterion
 export lohner, field_scales, cell_indicator, refine_mark, refine_flags,
-       refinement_buffer
+       firing_flags, refinement_buffer
 
 # Thread-scaling measurement
 export benchmark_phases, benchmark_driver
 
 include("precision.jl")
+include("device.jl")
 include("evolution.jl")
 include("refinement.jl")
 include("sinewave.jl")

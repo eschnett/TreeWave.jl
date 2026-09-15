@@ -12,28 +12,46 @@
 # formats what these return.
 
 """
-    best(f, reps)
+    best(f, reps; backend=CPU())
 
 The shortest of `reps` timings of `f`, after one warm-up call. The minimum
 is what a scaling study wants: noise only ever adds time, so the fastest
 run is the one least contaminated by everything else on the node.
+
+Each timing ends with a `synchronize`, which is a no-op on the CPU and is
+the difference between a measurement and a fiction on a device: a kernel
+launch and a broadcast both return before the work is done, so a phase
+timed without it reports how long it took to *ask*. The phases that go
+through the mesh synchronize on their own — `map_blocks!` and
+`fill_by_coordinates!` do — but the integrator's stage arithmetic is an
+ordinary broadcast and does not.
 """
-function best(f, reps)
+function best(f, reps; backend::Backend=CPU())
     f()
+    synchronize(backend)
     t = Inf
     for _ in 1:reps
-        t = min(t, @elapsed f())
+        t = min(t, @elapsed begin
+                    f()
+                    synchronize(backend)
+                end)
     end
     return t
 end
 
 """
-    benchmark_phases(::Val{D}; N, roots, G=2, ops, reps=5, σ=0.08, ...)
+    benchmark_phases([T], ::Val{D}; N, roots, G=2, ops, reps=5,
+                     backend=CPU(), ...)
 
 Seconds per phase of the path an adaptive run actually pays for, on the
 two-level mesh [`wave_forest`](@ref) builds. Returns
 `(sizes=..., timings=[name => seconds, ...])` with the phases in the order
 a step visits them; the caller formats.
+
+`T` and `backend` are what they are everywhere else in the package: the
+type the run computes in and where it runs, defaulting to `Float64` on
+the host. A device column and a host column of this table can therefore
+be read against each other, which is the point of it.
 
 The phases, and why each is here:
 
@@ -58,66 +76,77 @@ The phases, and why each is here:
   callback now runs concurrently across blocks.
 - `field_scales`, `refine_flags` — the refinement criterion: the global
   amplitude reduction and the per-cell Löhner sweep over every block. Both
-  run once per regrid.
+  run once per regrid. `refine_flags` times *whichever form the backend
+  calls for*, so the two columns under that name are two algorithms —
+  a host loop over cells against two `firing_boxes` kernels. That is the
+  honest comparison, since it is what a regrid costs either way, but it
+  is not the same code and the ratio should not be read as a speedup of
+  one thing.
 - `blast_reference`, `blast_radial_table` — the Hankel quadrature behind
   the exact ring: a one-off table of 4M Bessel evaluations and the
   per-chunk contraction against it. Mesh-independent, so their sizes come
-  from `nr`/`nk` rather than from the forest.
+  from `nr`/`nk` rather than from the forest. Host `Float64` work at every
+  backend, by design — `besselj0` has hardware-float methods only and a
+  reference table is the last thing worth uploading as fp64 — so these
+  two rows are expected not to move with the backend at all.
 - `blast_coverage` — the per-chunk diagnostic reduction over the feature's
   own cells.
 - `blast_exact` (D = 2 only) — filling a field set from the exact ring,
   the heaviest callback in the package: nine periodic images and two
   interpolations per cell.
 """
-function benchmark_phases(::Val{D}; N, roots, G=2,
+function benchmark_phases(::Type{T}, ::Val{D}; N, roots, G=2,
                           ops=Operators(prolongation=4, restriction=4),
-                          reps=5, σ=0.08, L=1.0, x0=0.25, cfl=0.25, steps=10,
-                          refine_tol=0.30, coarsen_tol=0.075, maxlevel_cap=2,
-                          nr=2001, nk=2000) where {D}
+                          reps=5, σ=T(2//25), L=one(T), x0=T(1//4),
+                          cfl=T(1//4), steps=10,
+                          refine_tol=T(3//10), coarsen_tol=T(3//40),
+                          maxlevel_cap=2, nr=2001, nk=2000,
+                          backend::Backend=CPU()) where {T,D}
     heavy = max(2, reps ÷ 2)                     # for the allocating phases
+    bestof(f, n) = best(f, n; backend=backend)
 
-    forest = wave_forest(Val(D), N, G; roots=roots, L=L)
-    fs = FieldSet(forest, 2)
-    schedule = GhostSchedule(forest, ops)
+    forest = wave_forest(T, Val(D), N, G; roots=roots, L=L)
+    fs = FieldSet(forest, 2; backend=backend)
+    schedule = GhostSchedule(forest, ops; T=T, backend=backend)
     problem = WaveProblem(fs, schedule)
 
-    initial = pulse_exact(D, L, x0, σ, 0.0)
+    initial = pulse_exact(D, L, x0, σ, zero(T))
     fill_by_coordinates!(initial, fs)
     u = statevector(fs)
     gather!(u, fs)
     du = similar(u)
     dt = cfl * minimum_spacing(forest)
 
-    t_step = best(heavy) do
-        solve(ODEProblem(wave_rhs!, u, (0.0, steps * dt), problem), RK4();
+    t_step = bestof(heavy) do
+        solve(ODEProblem(wave_rhs!, u, (zero(T), steps * dt), problem), RK4();
               dt=dt, adaptive=false, save_everystep=false)
     end / steps
-    t_rhs = best(() -> wave_rhs!(du, u, problem, 0.0), reps)
+    t_rhs = bestof(() -> wave_rhs!(du, u, problem, zero(T)), reps)
 
     # One RK4 combination, on vectors the integrator's caches are the size
     # of. Five reads and a write per entry, which is the shape of the
     # arithmetic `OrdinaryDiffEq` puts between RHS evaluations.
     k1, k2, k3, k4, tmp = (similar(u) for _ in 1:5)
-    t_stage = best(reps) do
+    t_stage = bestof(reps) do
         @. tmp = u + (dt / 6) * (k1 + 2 * k2 + 2 * k3 + k4)
     end
 
-    t_initial = best(() -> fill_by_coordinates!(initial, fs), heavy)
+    t_initial = bestof(() -> fill_by_coordinates!(initial, fs), heavy)
 
     # The criterion reads a 3-point stencil, so it wants ghosts; and the
     # scales have to exist before the flagging pass can be timed.
     fill_ghosts!(fs, schedule)
     scales = field_scales(fs)
-    t_scales = best(() -> field_scales(fs), reps)
-    t_flags = best(heavy) do
+    t_scales = bestof(() -> field_scales(fs), reps)
+    t_flags = bestof(heavy) do
         refine_flags(fs; scales=scales, refine_tol=refine_tol,
                      coarsen_tol=coarsen_tol, maxlevel_cap=maxlevel_cap)
     end
 
     x₀ = ntuple(_ -> L / 2, D)
-    rmax = 0.4 + 6σ
+    rmax = T(2//5) + 6σ
     build() = blast_reference(L, x₀, σ; rmax=rmax, nr=nr, nk=nk)
-    t_reference = best(build, 2)
+    t_reference = best(build, 2)                 # host work, any backend
     reference = build()
     t_table = best(() -> blast_radial_table(reference, 0.2), reps)
 
@@ -130,22 +159,27 @@ function benchmark_phases(::Val{D}; N, roots, G=2,
                "blast_reference" => t_reference,
                "blast_radial_table" => t_table]
 
-    push!(timings, "blast_coverage" => best(() -> blast_coverage(fs), reps))
+    push!(timings, "blast_coverage" => bestof(() -> blast_coverage(fs), reps))
 
     if D == 2
-        exact = blast_exact(reference, 0.2)
-        t_exact = best(() -> fill_by_coordinates!(exact, fs), heavy)
+        exact = blast_exact(T, reference, T(1//5); backend=backend)
+        t_exact = bestof(() -> fill_by_coordinates!(exact, fs), heavy)
         push!(timings, "blast_exact" => t_exact)
     end
 
     sizes = (D=D, N=N, roots=roots, blocks=nleaves(forest),
              cells=nleaves(forest) * N^D, statelength=length(u),
-             workbytes=sizeof(fs.work), nr=nr, nk=nk)
+             workbytes=sizeof(fs.work), nr=nr, nk=nk,
+             floattype=T, backend=nameof(typeof(backend)))
     return (sizes=sizes, timings=timings)
 end
 
+benchmark_phases(valD::Val; kwargs...) =
+    benchmark_phases(Float64, valD; kwargs...)
+
 """
-    benchmark_driver(; roots, N, σ, chunk, t_end, reps=2, kwargs...)
+    benchmark_driver([T]; roots, N, σ, chunk, t_end, reps=2, backend=CPU(),
+                     kwargs...)
 
 Wall time for a whole [`track_blast`](@ref) run — evolution, error
 measurement, flagging, regridding and all — as the end-to-end number the
@@ -159,9 +193,10 @@ size is raised by holding `σ / h₀` fixed instead — raise `roots` and `N`
 together and shrink `σ` to match — which is why every one of these is a
 keyword with no default.
 """
-function benchmark_driver(; roots, N, σ, chunk, t_end, reps=2, kwargs...)
-    run() = track_blast(Val(2); roots=roots, N=N, σ=σ, chunk=chunk, t_end=t_end,
-                        kwargs...)
+function benchmark_driver(::Type{T}=Float64; roots, N, σ, chunk, t_end, reps=2,
+                          backend::Backend=CPU(), kwargs...) where {T}
+    run() = track_blast(T, Val(2); roots=roots, N=N, σ=T(σ), chunk=T(chunk),
+                        t_end=T(t_end), backend=backend, kwargs...)
     result = run()                               # also the warm-up
     seconds = Inf
     for _ in 1:reps

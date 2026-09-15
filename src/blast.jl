@@ -41,11 +41,19 @@ expanding ring.
 `∂ₜu ≡ 0` has a consequence the refinement criterion cares about, and
 [`track_blast`](@ref) documents it: [`field_scales`](@ref) measured on
 this data returns *exactly zero* for variable 2.
+
+The radius is accumulated in a loop rather than with `sum(d -> …, 1:D)`
+because this closure is a kernel argument; adding to a `zero` is exact,
+so nothing measured moves. Everything it captures is a scalar or a
+tuple of them.
 """
 function blast_initial(D, L, x₀, σ; n=1)
     return function (x, var)
         var == 1 || return zero(float(σ))
-        r2 = sum(d -> (wrap(x[d] - x₀[d] + L / 2, L) - L / 2)^2, 1:D)
+        r2 = zero(float(σ))
+        for d in 1:D
+            r2 += (wrap(x[d] - x₀[d] + L / 2, L) - L / 2)^2
+        end
         return supergaussian(sqrt(r2), σ, n)
     end
 end
@@ -187,19 +195,26 @@ records the measured rates, and the quadrature's own error is some four
 orders below the finest discretization error, so what the comparison
 measures is the scheme and not the table.
 """
-function blast_exact(::Type{T}, ref, t) where {T}
+function blast_exact(::Type{T}, ref, t; backend::Backend=CPU()) where {T}
     # The quadrature is `Float64` (see `blast_reference`); converting its two
     # profiles here is the one and only place that crosses over, so the
     # closure below — which is what a field set is filled from, and therefore
-    # what would run on a device — is arithmetic in `T` alone.
+    # what runs on a device — is arithmetic in `T` alone.
     tab = blast_radial_table(ref, tofloat64(t))
-    us, vs = map(T, tab.us), map(T, tab.vs)
+    # The two profiles are the only arrays any callback in this package
+    # closes over, so they are also the only ones it has to place. Once
+    # per error measurement, `nr` values each.
+    us = to_backend(backend, map(T, tab.us))
+    vs = to_backend(backend, map(T, tab.vs))
     L, rmax, dr = T(ref.L), T(ref.rmax), T(ref.dr)
     x₀ = map(T, ref.x₀)
     nimages = ceil(Int, ref.rmax / ref.L)          # the reference is Float64
     return function (x, var)
-        u = zero(T)
-        v = zero(T)
+        # `zero(x[1])`, not `zero(T)`: a closure that captures a `Type`
+        # is the documented way to fail to compile for a device, and the
+        # coordinate carries the type anyway.
+        u = zero(x[1])
+        v = zero(x[1])
         for j1 in (-nimages):nimages, j2 in (-nimages):nimages
             r = hypot(x[1] - x₀[1] - j1 * L, x[2] - x₀[2] - j2 * L)
             r < rmax || continue
@@ -213,11 +228,13 @@ function blast_exact(::Type{T}, ref, t) where {T}
     end
 end
 
-blast_exact(ref, t) = blast_exact(Float64, ref, t)
+blast_exact(ref, t; kwargs...) = blast_exact(Float64, ref, t; kwargs...)
 
-function blast_exact(::Type{T}, L, x₀, σ, t; n=1, nr=2001, nk=2000) where {T}
+function blast_exact(::Type{T}, L, x₀, σ, t; n=1, nr=2001, nk=2000,
+                     backend::Backend=CPU()) where {T}
     check_blast_order(n)
-    return blast_exact(T, blast_reference(L, x₀, σ; rmax=t + 6σ, nr=nr, nk=nk), t)
+    ref = blast_reference(L, x₀, σ; rmax=t + 6σ, nr=nr, nk=nk)
+    return blast_exact(T, ref, t; backend=backend)
 end
 
 blast_exact(L, x₀, σ, t; kwargs...) = blast_exact(Float64, L, x₀, σ, t; kwargs...)
@@ -256,24 +273,31 @@ calibrated run and falls when the mesh falls behind.
 A fraction of *cells*, so it is `Float64` at every precision rather than the
 run's own type — see the rule under "Precision" in `CODE.md`.
 """
-function blast_coverage(fs::FieldSet)
-    peak = maximum(b -> maximum(abs, interiorview(fs, b, 1)), 1:nblocks(fs))
+function blast_coverage(fs::FieldSet{T}) where {T}
+    G = fs.forest.G
+    # Two per-block reduction passes, both through the mesh's own
+    # `block_partials`, so neither reads a cell from the host and both are
+    # bit-identical whatever the thread count -- see `field_scales`. The
+    # second cannot start until the first has finished: it needs the peak.
+    peaks = TreeAMR.block_partials(w -> maximum(abs, w),
+                                   (a, x) -> max(a, abs(x)), zero(T),
+                                   fs.work, fs; g=G, vars=1:1)
+    peak = maximum(peaks)
     finest = maximum(b -> level(blockkey(fs, b)), 1:nblocks(fs))
+
     # Counts per block, summed afterwards: integers, so the total is exact
-    # under any order, and the threshold pass cannot start until the peak
-    # reduction above has finished.
-    hot = zeros(Int, nblocks(fs))
-    fine = zeros(Int, nblocks(fs))
-    Threads.@threads for b in 1:nblocks(fs)
-        isfine = level(blockkey(fs, b)) == finest
-        for value in interiorview(fs, b, 1)
-            abs(value) > peak / 2 || continue
-            hot[b] += 1
-            isfine && (fine[b] += 1)
-        end
-    end
+    # under any order.
+    half = peak / 2
+    hot = TreeAMR.block_partials(w -> count(x -> abs(x) > half, w),
+                                 (a, x) -> a + (abs(x) > half), 0,
+                                 fs.work, fs; g=G, vars=1:1)
     total = sum(hot)
-    return total == 0 ? 1.0 : sum(fine) / total
+    total == 0 && return 1.0
+    # Which blocks are the fine ones needs the tree, so that part stays
+    # here; what it reduces is one integer per block.
+    isfine(b) = level(blockkey(fs, b)) == finest
+    fine = sum(hot[b] for b in 1:nblocks(fs) if isfine(b); init=0)
+    return fine / total
 end
 
 """
@@ -313,6 +337,12 @@ invalidate it. This is what the viewer in `bin/` uses.
 MultiFloats type as well — but the exact ring it is measured against is a
 `Float64` quadrature whatever `T` is; see [`blast_reference`](@ref) and
 "Precision" in `CODE.md`.
+
+`backend` is where it is computed, defaulting to the host. This is the
+case where that asks the most: the quadrature stays a host `Float64`
+table, and its two radial profiles are converted and uploaded once per
+error measurement by [`blast_exact`](@ref). See "Running on a device" in
+`CODE.md`.
 """
 function track_blast(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
                      σ=T(2//25), n=1, x₀=nothing,
@@ -320,11 +350,11 @@ function track_blast(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
                      t_end=T(2//5), chunk=T(1//50), cfl=T(1//4), maxlevel_cap=2,
                      refine_tol=T(3//10), coarsen_tol=T(3//40), ε=T(1//100),
                      buffer=nothing, refresh_scales=true,
-                     observer=nothing) where {T,D}
+                     backend::Backend=CPU(), observer=nothing) where {T,D}
     forest = Forest{T}(ntuple(_ -> roots, D); N=N, G=G,
                        periodic=ntuple(_ -> true, D),
                        extents=ntuple(_ -> (zero(T), L), D))
-    fs = FieldSet(forest, 2)
+    fs = FieldSet(forest, 2; backend=backend)
     x₀ = x₀ === nothing ? ntuple(_ -> L / 2, D) : x₀
     check_blast_order(n)
 
@@ -343,12 +373,14 @@ function track_blast(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
     fill_by_coordinates!(initial, fs)
 
     scales = field_scales(fs)
-    flag(b, k) = refine_mark(fs, b, k; scales=scales, refine_tol=refine_tol,
-                             coarsen_tol=coarsen_tol,
-                             maxlevel_cap=maxlevel_cap, ε=ε)
+    # `scales` is reassigned below, so this reads the current value at
+    # every call rather than the initial one -- which is the point.
+    flags(f) = refine_flags(f; scales=scales, refine_tol=refine_tol,
+                            coarsen_tol=coarsen_tol,
+                            maxlevel_cap=maxlevel_cap, ε=ε)
 
     schedule, _, _ = adapt_to_initial_data!(fs, ops; initial=initial,
-                                            flag=flag, buffer=buffer,
+                                            flags=flags, buffer=buffer,
                                             maxpasses=8)
     nblocks_initial = nleaves(forest)
 
@@ -380,8 +412,9 @@ function track_blast(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
         # Error against the exact ring, at every chunk rather than only at
         # the end: the mesh is rebuilt twenty times over the run and the
         # question is whether any one of those rebuilds hurt.
-        exact = FieldSet(forest, 2)
-        fill_by_coordinates!(blast_exact(T, reference, t), exact)
+        exact = FieldSet(forest, 2; backend=backend)
+        fill_by_coordinates!(blast_exact(T, reference, t; backend=backend),
+                             exact)
         ue = statevector(exact)
         gather!(ue, exact)
         worst = max(worst, volume_weighted_norm(fs, sol.u[end] .- ue; p=Inf))
@@ -403,9 +436,10 @@ function track_blast(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
         # and `nblocks` below is meant to describe the mesh `worst` was
         # measured against.
         c < nchunks || break
-        flags = flag_blocks(flag, forest)
-        if regrid!(forest, fs, schedule; flags=flags, buffer=buffer)
-            schedule = GhostSchedule(forest, ops)
+        if regrid!(forest, fs, schedule; flags=flags(fs), buffer=buffer)
+            # For the field set's backend, not the host: the stencils are
+            # read inside the transfer kernel.
+            schedule = GhostSchedule(forest, ops; T=T, backend=backend)
         end
     end
 
@@ -430,11 +464,12 @@ criterion was refining more than it judged necessary.
 function uniform_blast(::Type{T}, ::Val{2}; roots, N, G=2, L=one(T),
                        σ=T(2//25), n=1, x₀=nothing,
                        ops=Operators(prolongation=4, restriction=4),
-                       t_end=T(2//5), cfl=T(1//4)) where {T}
+                       t_end=T(2//5), cfl=T(1//4),
+                       backend::Backend=CPU()) where {T}
     forest = Forest{T}((roots, roots); N=N, G=G, periodic=(true, true),
                        extents=ntuple(_ -> (zero(T), L), 2))
-    fs = FieldSet(forest, 2)
-    schedule = GhostSchedule(forest, ops)
+    fs = FieldSet(forest, 2; backend=backend)
+    schedule = GhostSchedule(forest, ops; T=T, backend=backend)
     x₀ = x₀ === nothing ? (L / 2, L / 2) : x₀
     check_blast_order(n)
     fill_by_coordinates!(blast_initial(2, L, x₀, σ; n=n), fs)
@@ -445,8 +480,9 @@ function uniform_blast(::Type{T}, ::Val{2}; roots, N, G=2, L=one(T),
     sol = solve(ODEProblem(wave_rhs!, u, (zero(T), t_end),
                            WaveProblem(fs, schedule)), RK4();
                 dt=t_end / nsteps, adaptive=false, save_everystep=false)
-    exact = FieldSet(forest, 2)
-    fill_by_coordinates!(blast_exact(T, L, x₀, σ, t_end), exact)
+    exact = FieldSet(forest, 2; backend=backend)
+    fill_by_coordinates!(blast_exact(T, L, x₀, σ, t_end; backend=backend),
+                         exact)
     ue = statevector(exact)
     gather!(ue, exact)
     return (err=volume_weighted_norm(fs, sol.u[end] .- ue; p=Inf),

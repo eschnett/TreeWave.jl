@@ -7,6 +7,12 @@
 # but the buffering that follows from it is the mesh's job, and this file
 # only has to report *where* the criterion fired so TreeAMR can dilate it.
 #
+# The criterion exists in two forms, because block storage may be on a
+# device and a host loop cannot read it. They share the per-cell
+# indicator (`cell_tau`) and they reach the identical verdict; what
+# differs is who walks the cells -- this file, or TreeAMR's
+# `firing_boxes` kernel. See "Running on a device" in `CODE.md`.
+#
 # What refinement is for is resolution, not amplitude. The criterion this
 # replaced refined where |u| was large, which only ever worked because the
 # pulse sat on a zero background; on the sine mode it would have refined
@@ -99,13 +105,51 @@ first application loop that does not.
 """
 function field_scales(fs::FieldSet{T}; vars=1:fs.nvars) where {T}
     R = real(float(T))
-    partials = Matrix{R}(undef, nblocks(fs), length(vars))
-    Threads.@threads for b in 1:nblocks(fs)
-        for (j, v) in enumerate(vars)
-            partials[b, j] = maximum(abs, interiorview(fs, b, v))
+    G = fs.forest.G
+    # One reduction per variable rather than one loop over both: a
+    # device reduction is a kernel launch and a launch takes a single
+    # variable range, and two launches once per regrid cost nothing
+    # against the sweep that follows.
+    return [maximum(TreeAMR.block_partials(w -> maximum(abs, w),
+                                           (a, x) -> max(a, abs(x)), zero(R),
+                                           fs.work, fs; g=G, vars=v:v))
+            for v in vars]
+end
+
+"""
+    cell_tau(work, idx, b, vars, scales, ε)
+
+The worst [`lohner`](@ref) indicator over every dimension and variable at
+one cell: `work` the ghost-inclusive working array, `idx` the cell's
+**stored** index, `b` its block.
+
+This is the whole of the criterion's arithmetic, and it is one function
+because it is evaluated from two places that must not drift apart --
+[`cell_indicator`](@ref)'s host loop and [`firing_flags`](@ref)'s device
+kernel. The argument list is not this package's choice: it is exactly
+what TreeAMR's `firing_boxes` hands a per-cell predicate, so the device
+form can pass its arguments straight through.
+
+`vars` and `scales` are **tuples**, not vectors. A kernel argument has to
+be `isbits`, and a captured `Vector` is not; the same rule is why `ε` is
+passed rather than defaulted here and why the accumulator starts at
+`zero(scales[1])` rather than `zero(T)` — a captured `Type` is the
+documented way to fail to compile for a device.
+"""
+@inline function cell_tau(work, idx::NTuple{D,Int}, b::Integer,
+                          vars::NTuple{V,Int}, scales::NTuple{V}, ε) where {D,V}
+    τ = zero(scales[1])
+    for j in 1:V
+        v = vars[j]
+        scale = scales[j]
+        u0 = work[idx..., v, b]
+        for d in 1:D
+            up = work[Base.setindex(idx, idx[d] + 1, d)..., v, b]
+            um = work[Base.setindex(idx, idx[d] - 1, d)..., v, b]
+            τ = max(τ, lohner(um, u0, up, scale; ε=ε))
         end
     end
-    return [maximum(view(partials, :, j)) for j in 1:length(vars)]
+    return τ
 end
 
 """
@@ -122,6 +166,11 @@ Taking the maximum over variables matters for a system: for the
 travelling pulse `∂ₜu` has an order of magnitude more amplitude than `u`,
 so a feature can be badly under-resolved in one while the other still
 looks smooth.
+
+The host form of the criterion: it indexes the working array cell by
+cell, so it needs the data under its own pointer. The per-cell
+arithmetic is [`cell_tau`](@ref), shared with the device form; see
+[`firing_flags`](@ref).
 
 !!! warning "Ghosts must be filled first"
     The stencil reaches one cell beyond the interior at each face, so the
@@ -140,31 +189,31 @@ function cell_indicator(fs::FieldSet{T,D}, b::Integer, box_tol;
     length(scales) == length(vars) || throw(DimensionMismatch(
         "got $(length(scales)) scales for $(length(vars)) variables"))
 
-    # Ghost-inclusive views, so the stencil at the first and last interior
-    # cell has something to read.
-    ws = [blockview(fs, b, v) for v in vars]
-    unit = ntuple(d -> CartesianIndex(ntuple(k -> k == d ? 1 : 0, Val(D))), Val(D))
+    # Tuples, built once outside the loop: that is what `cell_tau` takes,
+    # because that is what a kernel argument may be.
+    vt = ntuple(j -> Int(vars[j]), length(vars))
+    st = Tuple(scales)
 
     τmax = zero(float(T))
     fired = false
     lo = ntuple(_ -> N, Val(D))
     hi = ntuple(_ -> 1, Val(D))
 
-    for I in CartesianIndices(ntuple(_ -> (G + 1):(G + N), Val(D)))
-        τ = zero(τmax)
-        for (w, scale) in zip(ws, scales), d in 1:D
-            e = unit[d]
-            τ = max(τ, lohner(w[I - e], w[I], w[I + e], scale; ε=ε))
-        end
+    # Over interior indices `1:N`, with the stored index derived -- the
+    # same walk TreeAMR's firing kernel makes, so the two forms of the
+    # criterion can be read against each other.
+    for c in CartesianIndices(ntuple(_ -> N, Val(D)))
+        i = ntuple(d -> Tuple(c)[d], Val(D))
+        idx = ntuple(d -> i[d] + G, Val(D))
+        τ = cell_tau(fs.work, idx, b, vt, st, ε)
         τmax = max(τmax, τ)
         τ > box_tol || continue
-        # Stored indices run G+1:G+N; a flag box is stated over 1:N.
         if fired
-            lo = ntuple(d -> min(lo[d], I[d] - G), Val(D))
-            hi = ntuple(d -> max(hi[d], I[d] - G), Val(D))
+            lo = ntuple(d -> min(lo[d], i[d]), Val(D))
+            hi = ntuple(d -> max(hi[d], i[d]), Val(D))
         else
             fired = true
-            lo = hi = ntuple(d -> I[d] - G, Val(D))
+            lo = hi = i
         end
     end
 
@@ -249,15 +298,91 @@ function refine_mark(fs::FieldSet{T,D}, b::Integer, k::MortonKey{D};
 end
 
 """
+    firing_flags(fs; scales, refine_tol, coarsen_tol, maxlevel_cap, vars, ε)
+
+[`refine_mark`](@ref)'s verdict for every leaf, reached without a host
+loop over cells: the flag vector `regrid!` takes, computed on whatever
+backend the field set lives on.
+
+The split is TreeAMR's `firing_boxes`: the mesh walks every interior cell
+of every block in one kernel and reduces the cells that fired to a count
+and a bounding box, and the application turns that into flags, because
+which flag is physics the mesh cannot know. The four cases below are
+[`refine_mark`](@ref)'s, line for line, and the box threshold is
+`coarsen_tol` for the reason stated there.
+
+**Two sweeps, because there are two thresholds.** A firing count answers
+one yes-or-no question per block, and the criterion asks two: is any cell
+above `refine_tol` (a count of zero is exactly `τmax <= refine_tol`,
+since the count is over cells and `τmax` is their maximum), and where are
+the cells above `coarsen_tol`. The second cannot be recovered from the
+first, so the cells are walked twice. That is the cost of the form, and
+it is paid once per regrid against an evolution of many steps.
+
+Both predicates close over tuples and scalars only. See
+[`cell_tau`](@ref) for why that is not a detail.
+"""
+function firing_flags(fs::FieldSet{T,D}; scales, refine_tol, coarsen_tol,
+                      maxlevel_cap, vars=1:fs.nvars, ε=T(1//100)) where {T,D}
+    coarsen_tol < refine_tol || throw(ArgumentError(
+        "coarsen_tol ($coarsen_tol) must lie below refine_tol ($refine_tol): the " *
+        "gap between them is the dead band that stops blocks flickering"))
+    length(scales) == length(vars) || throw(DimensionMismatch(
+        "got $(length(scales)) scales for $(length(vars)) variables"))
+
+    vt = ntuple(j -> Int(vars[j]), length(vars))
+    st = Tuple(scales)
+
+    refires = firing_boxes(fs) do work, idx, b, x
+        cell_tau(work, idx, b, vt, st, ε) > refine_tol
+    end
+    boxfires = firing_boxes(fs) do work, idx, b, x
+        cell_tau(work, idx, b, vt, st, ε) > coarsen_tol
+    end
+
+    return map(1:nblocks(fs)) do b
+        k = blockkey(fs, b)
+        nrefine, _ = refires[b]
+        nbox, box = boxfires[b]
+        if nrefine > 0 && level(k) < maxlevel_cap
+            return (Refine, box)
+        elseif nbox > 0
+            return (Keep, box)
+        elseif level(k) > 0
+            return Coarsen
+        else
+            return Keep
+        end
+    end
+end
+
+"""
     refine_flags(fs; refine_tol, coarsen_tol, maxlevel_cap, scales, vars, ε)
 
 [`refine_mark`](@ref) for every leaf, as the flag vector `regrid!` takes.
 `scales` defaults to a fresh [`field_scales`](@ref) reduction, computed
 once for the whole pass. Ghosts must be filled first; see
 [`cell_indicator`](@ref).
+
+Whichever form of the criterion the storage calls for: the host loop on
+the CPU, [`firing_flags`](@ref) on a device. The choice lives here so
+that no driver has to make it: `track_pulse` and `track_blast` pass a
+`backend` to the field set and then call this, and nothing between them
+knows which form ran.
+
+The host form is kept rather than retired in favour of the one that runs
+everywhere, and not out of caution. It is the readable statement of the
+criterion, it is what every number recorded in `CODE.md` was measured
+with, and it returns `τmax` — which the 2D viewer draws and
+`test/refinement_tests.jl` makes claims about — where a firing count
+does not. It is also what the device form is *tested against*: the two
+agree flag for flag and box for box on the CPU backend, which is the one
+assertion that catches a drift between them.
 """
 function refine_flags(fs::FieldSet; vars=1:fs.nvars,
                       scales=field_scales(fs; vars=vars), kwargs...)
+    get_backend(fs.work) isa CPU ||
+        return firing_flags(fs; scales=scales, vars=vars, kwargs...)
     return flag_blocks(fs.forest) do b, k
         refine_mark(fs, b, k; scales=scales, vars=vars, kwargs...)
     end

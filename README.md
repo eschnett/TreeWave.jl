@@ -32,4 +32,12 @@ the answer is bit-identical whatever the thread count. What that does
 *not* buy is the whole step, because the integrator's stage arithmetic
 stays serial; the measured numbers are in [CODE.md](CODE.md).
 
+It also runs on a GPU with nothing to configure but where the storage
+goes: every driver takes a KernelAbstractions `backend` alongside its
+type, and both viewers and the benchmark take `--backend=cuda|metal`. No
+device package is a dependency of this one. What that buys is the
+compute-bound work — 8× on initial data on an M3 Pro — and, on unified
+memory, nothing at all on the memory-bound right-hand side; "Running on a
+device" in [CODE.md](CODE.md) has the table and the reason.
+
 See [CODE.md](CODE.md) for the design and the measured results.

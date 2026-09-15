@@ -32,11 +32,19 @@ end
 """
 Everything the right-hand side needs, built once. The application writes
 `f!` itself and calls scatter -> fill_ghosts -> map_blocks explicitly.
+
+The spacings are the one thing the kernel reads that the mesh does not
+hand it, so they are also the one thing this application has to place
+itself: they follow the field set onto its backend. Nothing in the kernel
+above changes for a device — that is the whole point of writing the RHS
+as a kernel in the first place — but a host `Vector` of spacings would
+be the wrong memory, and `V` is a type parameter rather than
+`Vector{T}` so that it can be the right one.
 """
-struct WaveProblem{T,D,G,F,S}
+struct WaveProblem{T,D,G,F,S,V}
     fs::F
     schedule::S
-    spacings::Vector{T}
+    spacings::V                  # per block, wherever the kernel runs
     valD::Val{D}
     valG::Val{G}
 end
@@ -45,8 +53,9 @@ end
 # them once, rather than rebuilding them at every RHS evaluation.
 function WaveProblem(fs::FieldSet{T,D}, schedule) where {T,D}
     G = fs.forest.G
-    return WaveProblem{T,D,G,typeof(fs),typeof(schedule)}(
-        fs, schedule, block_spacings(fs.forest, T), Val(D), Val(G))
+    spacings = to_backend(get_backend(fs.work), block_spacings(fs.forest, T))
+    return WaveProblem{T,D,G,typeof(fs),typeof(schedule),typeof(spacings)}(
+        fs, schedule, spacings, Val(D), Val(G))
 end
 
 function wave_rhs!(du, u, p, t)

@@ -70,7 +70,7 @@ Refinement is driven by the per-cell criterion in `refinement.jl`: where
 the mesh fails to resolve the data, not where the amplitude is large. The
 depth is therefore an *output* of the run — at the default tolerances the
 indicator stops at level 2 on its own, with `maxlevel_cap` never binding — and
-the same [`refine_mark`](@ref) serves both the initial adaptation and the
+the same [`refine_flags`](@ref) serves both the initial adaptation and the
 evolution so the two cannot drift apart.
 
 The buffer width is derived from the pulse's motion by
@@ -86,17 +86,23 @@ would invalidate it. This is what the viewer in `bin/` uses.
 schedule and the state vector from there. This case needs only `exp` and
 integer powers, so unlike the sine mode it runs at a MultiFloats type as
 well; see "Precision" in `CODE.md`.
+
+`backend` is where it is computed, defaulting to the host. Only the field
+set and the schedule are told; the state vector, the regrid and the
+refinement criterion all follow the storage. See "Running on a device" in
+`CODE.md`.
 """
 function track_pulse(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
                      σ=T(1//20), x0=T(1//4), n=1,
                      ops=Operators(prolongation=4, restriction=4),
                      t_end=T(1//2), chunk=T(1//20), cfl=T(1//4), maxlevel_cap=2,
                      refine_tol=T(3//10), coarsen_tol=T(3//40), ε=T(1//100),
-                     buffer=nothing, observer=nothing) where {T,D}
+                     buffer=nothing, backend::Backend=CPU(),
+                     observer=nothing) where {T,D}
     forest = Forest{T}(ntuple(_ -> roots, D); N=N, G=G,
                        periodic=ntuple(_ -> true, D),
                        extents=ntuple(_ -> (zero(T), L), D))
-    fs = FieldSet(forest, 2)
+    fs = FieldSet(forest, 2; backend=backend)
 
     # The wave speed is 1, so the pulse travels exactly `chunk` between one
     # regrid and the next. Deriving the margin from that is the
@@ -115,13 +121,19 @@ function track_pulse(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
     # refresh it at.
     scales = field_scales(fs)
 
-    flag(b, k) = refine_mark(fs, b, k; scales=scales, refine_tol=refine_tol,
-                             coarsen_tol=coarsen_tol, maxlevel_cap=maxlevel_cap, ε=ε)
+    # The whole flag vector at once rather than a mark per block, which is
+    # the form that has a device implementation: `refine_flags` picks the
+    # host loop or the firing kernel from where the storage is, and on the
+    # host it resolves to the identical `flag_blocks` call.
+    flags(f) = refine_flags(f; scales=scales, refine_tol=refine_tol,
+                            coarsen_tol=coarsen_tol,
+                            maxlevel_cap=maxlevel_cap, ε=ε)
 
     schedule, _, _ = adapt_to_initial_data!(fs, ops;
                                             initial=pulse_exact(D, L, x0, σ, zero(T);
                                                                 n=n),
-                                            flag=flag, buffer=buffer, maxpasses=8)
+                                            flags=flags, buffer=buffer,
+                                            maxpasses=8)
 
     if observer !== nothing
         u0 = statevector(fs)
@@ -153,29 +165,35 @@ function track_pulse(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
         observer === nothing || observer(fs, t, sol.u[end])
 
         # Error against the exact travelling pulse.
-        exact = FieldSet(forest, 2)
+        exact = FieldSet(forest, 2; backend=backend)
         fill_by_coordinates!(pulse_exact(D, L, x0, σ, t; n=n), exact)
         ue = statevector(exact)
         gather!(ue, exact)
         worst = max(worst, volume_weighted_norm(fs, sol.u[end] .- ue; p=Inf))
 
         # How much of the pulse sits in refined blocks -- the measure of
-        # whether the refined region is actually following it.
+        # whether the refined region is actually following it. One peak
+        # per block from the mesh's own per-block reduction, so the data
+        # is never read cell by cell from the host; the verdict, which
+        # needs the tree, is the loop below.
+        peaks = TreeAMR.block_partials(w -> maximum(abs, w),
+                                       (a, x) -> max(a, abs(x)), zero(T),
+                                       fs.work, fs; g=G, vars=1:1)
         inside = zero(T)
         total = zero(T)
         for b in 1:nblocks(fs)
-            peak = maximum(abs, interiorview(fs, b, 1))
-            total = max(total, peak)
-            level(blockkey(fs, b)) > 0 && (inside = max(inside, peak))
+            total = max(total, peaks[b])
+            level(blockkey(fs, b)) > 0 && (inside = max(inside, peaks[b]))
         end
         push!(refined_fraction, total > 0 ? inside / total : zero(T))
 
         # The indicator reads a 3-point stencil, so it needs ghosts; and
         # `regrid!` fills them only afterwards, for the transfer.
         fill_ghosts!(fs, schedule)
-        flags = flag_blocks(flag, forest)
-        if regrid!(forest, fs, schedule; flags=flags, buffer=buffer)
-            schedule = GhostSchedule(forest, ops)
+        if regrid!(forest, fs, schedule; flags=flags(fs), buffer=buffer)
+            # For the field set's backend, not the host: the stencils are
+            # read inside the transfer kernel.
+            schedule = GhostSchedule(forest, ops; T=T, backend=backend)
         end
     end
 
@@ -193,12 +211,13 @@ adaptive run is judged against: matching the finest uniform mesh is what
 function uniform_pulse(::Type{T}, ::Val{D}; roots, N, G=2, L=one(T),
                        σ=T(2//25), x0=T(1//4), n=1,
                        ops=Operators(prolongation=4, restriction=4),
-                       t_end=T(1//2), cfl=T(1//4)) where {T,D}
+                       t_end=T(1//2), cfl=T(1//4),
+                       backend::Backend=CPU()) where {T,D}
     forest = Forest{T}(ntuple(_ -> roots, D); N=N, G=G,
                        periodic=ntuple(_ -> true, D),
                        extents=ntuple(_ -> (zero(T), L), D))
-    fs = FieldSet(forest, 2)
-    schedule = GhostSchedule(forest, ops)
+    fs = FieldSet(forest, 2; backend=backend)
+    schedule = GhostSchedule(forest, ops; T=T, backend=backend)
     fill_by_coordinates!(pulse_exact(D, L, x0, σ, zero(T); n=n), fs)
     u = statevector(fs)
     gather!(u, fs)
@@ -206,7 +225,7 @@ function uniform_pulse(::Type{T}, ::Val{D}; roots, N, G=2, L=one(T),
     nsteps = ceilint(t_end / dt)
     sol = solve(ODEProblem(wave_rhs!, u, (zero(T), t_end), WaveProblem(fs, schedule)),
                 RK4(); dt=t_end / nsteps, adaptive=false, save_everystep=false)
-    exact = FieldSet(forest, 2)
+    exact = FieldSet(forest, 2; backend=backend)
     fill_by_coordinates!(pulse_exact(D, L, x0, σ, t_end; n=n), exact)
     ue = statevector(exact)
     gather!(ue, exact)

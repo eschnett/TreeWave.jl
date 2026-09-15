@@ -27,13 +27,23 @@ The exact solution, as a `(x, v) -> value` callback for a field set.
 
 `2π` is built once here rather than inside the closure: for a software float
 type `T(π)` goes through `BigFloat`, which must not happen per cell.
+
+The closure is a kernel argument, so it captures scalars and nothing
+else. That is also why the product over dimensions is an accumulating
+loop and not `prod(... for d in 1:D)`, and why the accumulator starts at
+`one(twoπ)` rather than `one(T)`: `T` here is a local, so closing over it
+would put a `Type` in a kernel argument. Multiplying by one is exact, so
+no measured number moves.
 """
 function wave_exact(D, L, m, t)
     T = typeof(float(L))
     ω = wave_omega(D, L, m)
     twoπ = 2 * T(π)
     return function (x, var)
-        shape = prod(sin(twoπ * m * x[d] / L) for d in 1:D)
+        shape = one(twoπ)
+        for d in 1:D
+            shape *= sin(twoπ * m * x[d] / L)
+        end
         return var == 1 ? cos(ω * t) * shape : -ω * sin(ω * t) * shape
     end
 end
@@ -78,15 +88,20 @@ solution is stored.
 `T` is the floating-point type the run is computed in, defaulting to
 `Float64`. Note that this case needs `sin` and `cos`, so it is not
 available at a MultiFloats type; see "Precision" in `CODE.md`.
+
+`backend` is where it is computed, defaulting to the host. It is said
+twice — to the field set and to the schedule — and everything else
+follows the storage; see "Running on a device" in `CODE.md`.
 """
 function wave_errors(::Type{T}, ::Val{D}; N, G=1,
                      ops=Operators(prolongation=2, restriction=2),
                      roots=4, L=one(T), m=1,
                      cfl=T(1//4), periods=T(1//4), alg=RK4(), refined=true,
+                     backend::Backend=CPU(),
                      observer=nothing, nsnapshots=64) where {T,D}
     forest = wave_forest(T, Val(D), N, G; roots=roots, L=L, refined=refined)
-    fs = FieldSet(forest, 2)
-    problem = WaveProblem(fs, GhostSchedule(forest, ops))
+    fs = FieldSet(forest, 2; backend=backend)
+    problem = WaveProblem(fs, GhostSchedule(forest, ops; T=T, backend=backend))
 
     fill_by_coordinates!(wave_exact(D, L, m, zero(T)), fs)
     u0 = statevector(fs)
@@ -99,7 +114,10 @@ function wave_errors(::Type{T}, ::Val{D}; N, G=1,
     dt = t_end / nsteps                          # land exactly on t_end
 
     # `saveat` spans the run inclusive of both ends, so `sol.u[end]` is
-    # still the solution at `t_end` and the error below is unaffected.
+    # still the solution at `t_end` and the error below is unaffected. It
+    # also keeps `nsnapshots` state vectors alive, which on a device is
+    # device memory -- fine at the sizes a viewer asks for, and the
+    # reason the observer path is opt-in.
     saveat = observer === nothing ? T[] :
              collect(range(zero(T), t_end; length=nsnapshots))
 
@@ -116,7 +134,7 @@ function wave_errors(::Type{T}, ::Val{D}; N, G=1,
         end
     end
 
-    exact = FieldSet(forest, 2)
+    exact = FieldSet(forest, 2; backend=backend)
     fill_by_coordinates!(wave_exact(D, L, m, t_end), exact)
     uexact = statevector(exact)
     gather!(uexact, exact)
