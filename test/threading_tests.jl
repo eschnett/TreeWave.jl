@@ -37,7 +37,7 @@ end
     # only that two long outputs differ.
     #
     # Two of the four now reach the answer through TreeAMR's
-    # `block_partials` rather than through a loop here (see "Running on a
+    # `block_mapreduce` rather than through a loop here (see "Running on a
     # device" in CODE.md), so for those this guards a *boundary*: the
     # value has to stay the one the serial loop gave, whoever computes
     # it, and an upstream change of summation order would show up here

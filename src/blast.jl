@@ -274,23 +274,18 @@ A fraction of *cells*, so it is `Float64` at every precision rather than the
 run's own type — see the rule under "Precision" in `CODE.md`.
 """
 function blast_coverage(fs::FieldSet{T}) where {T}
-    G = fs.forest.G
     # Two per-block reduction passes, both through the mesh's own
-    # `block_partials`, so neither reads a cell from the host and both are
+    # `block_mapreduce`, so neither reads a cell from the host and both are
     # bit-identical whatever the thread count -- see `field_scales`. The
     # second cannot start until the first has finished: it needs the peak.
-    peaks = TreeAMR.block_partials(w -> maximum(abs, w),
-                                   (a, x) -> max(a, abs(x)), zero(T),
-                                   fs.work, fs; g=G, vars=1:1)
+    peaks = block_mapreduce(abs, max, zero(T), fs; vars=1)
     peak = maximum(peaks)
     finest = maximum(b -> level(blockkey(fs, b)), 1:nblocks(fs))
 
     # Counts per block, summed afterwards: integers, so the total is exact
     # under any order.
     half = peak / 2
-    hot = TreeAMR.block_partials(w -> count(x -> abs(x) > half, w),
-                                 (a, x) -> a + (abs(x) > half), 0,
-                                 fs.work, fs; g=G, vars=1:1)
+    hot = block_mapreduce(x -> abs(x) > half, +, 0, fs; vars=1)
     total = sum(hot)
     total == 0 && return 1.0
     # Which blocks are the fine ones needs the tree, so that part stays

@@ -13,10 +13,12 @@ application.
 - Show the whole path from mesh to solution: initial data, right-hand
   side, time integration, regridding, error measurement, visualization.
 - Use TreeAMR's public API. Nothing here is mesh machinery that belongs
-  upstream, and there is exactly **one** exception to the "no internals"
-  rule, recorded rather than quietly taken: `TreeAMR.block_partials`, the
-  per-block reduction every diagnostic upstream is built on, which is
-  unexported and ought not to be. See
+  upstream, and there are now no exceptions. There was exactly one, and
+  recording it rather than quietly taking it is what got it fixed:
+  `TreeAMR.block_partials`, the per-block reduction every diagnostic
+  upstream is built on, was unexported and ought not to have been.
+  Upstream agreed, and it is now public as `block_mapreduce` — with a
+  better signature than the one this package was reaching for. See
   [Running on a device](#running-on-a-device).
 - Be small enough to read in one sitting.
 - Run in the caller's floating-point type, not only `Float64` — TreeAMR's
@@ -550,7 +552,7 @@ an accumulator shared between tasks.
 
 Two of the four have since gone back upstream. `field_scales` and
 `blast_coverage` were per-block reductions over field data, which is
-exactly what `TreeAMR.block_partials` is, and a per-block reduction over
+exactly what `TreeAMR.block_mapreduce` is, and a per-block reduction over
 field data is the one shape that has to change on a device. They now call
 it and the discipline above is upstream's to keep; the two that remain
 here are the Hankel table and its contraction, which are host `Float64`
@@ -730,14 +732,34 @@ and bounding box, and the application turns that into flags. See below.
 
 **Three diagnostics were per-block reductions over field data.**
 `field_scales`, [`blast_coverage`](src/blast.jl) and `track_pulse`'s
-tracking measure now go through `TreeAMR.block_partials` — threaded host
-views on the CPU, one kernel work item per block otherwise, host partials
-combined in block order either way. It is the one **unexported** upstream
-name this package uses, and it is used rather than reimplemented because
-a second copy of a determinism argument is a second thing to get wrong;
-it deserves to be exported and that is a request to make upstream. What
-stayed here is the part that needs the *tree* — which blocks are refined,
-which are at the finest level — reducing one number per block.
+tracking measure go through `block_mapreduce` — threaded host views on
+the CPU, one kernel work item per block otherwise, per-block values
+combined in block order either way. They call it rather than reimplement
+it because a second copy of a determinism argument is a second thing to
+get wrong. What stayed here is the part that needs the *tree* — which
+blocks are refined, which are at the finest level — reducing one number
+per block.
+
+That name was `TreeAMR.block_partials` when this was written, and using
+it was the one documented exception to the "public API only" rule, with a
+request to make upstream. Upstream took the request and, in taking it,
+found three things wrong with the signature this package had been
+working around — worth recording, because finding them is the argument
+for reporting an internal you depend on rather than quietly depending on
+it:
+
+- It took a host block-reducer *and* a kernel-form fold, which had to
+  agree and which nothing checked. Every call here passed both, spelled
+  twice (`w -> maximum(abs, w)` and `(a, x) -> max(a, abs(x))`). They can
+  disagree: upstream measured a 3.0e-15 divergence in `D = 1` with a
+  scalar variable selection, where the host view goes `IndexLinear` and
+  `sum` turns pairwise. The public form is `mapreduce`-shaped, so the
+  four call sites here each collapsed to one line.
+- It took a bare array plus the matching ghost offset. Every call here
+  passed `fs.work, fs; g=G`, and getting `g` wrong would have read the
+  ghosts silently. The public form takes the field set and works it out.
+- Its variable selection meant different things on the two backends. The
+  public form refuses anything a kernel cannot take, with a reason.
 
 **One callback closed over arrays.** [`blast_exact`](src/blast.jl) closes
 over the two radial profiles of the Hankel table, so on a device they are

@@ -170,10 +170,14 @@ nearly all of it compiling the two firing kernels.
   for a GPU.** A whole `track_blast` is 7× *slower* on Metal at 52k
   cells. That is launch overhead, not a regression: measure phases at
   `--n=128 --roots=32` (29.4M cells), which is what `CODE.md` records.
-- **`TreeAMR.block_partials` is unexported.** It is the one internal this
-  package uses, deliberately and recorded in `CODE.md`'s goals. If
-  upstream renames it, `field_scales`, `blast_coverage` and
-  `track_pulse`'s tracking measure all break at once.
+- **`block_mapreduce` is where the per-block reductions go.**
+  `field_scales`, `blast_coverage` and `track_pulse`'s tracking measure
+  all reduce field data one block at a time, and all three go through
+  TreeAMR rather than looping here — the thread-count determinism is
+  upstream's invariant and a second copy of that argument is a second
+  thing to get wrong. It was the unexported `TreeAMR.block_partials`
+  until upstream exported it; if you find prose here still saying that,
+  it is stale.
 - **`julia -t N` asks for `N + 1` threads.** The interactive thread is
   added on top of the count given, so with `JULIA_EXCLUSIVE=1` pinning one
   thread per core, `-t 64` on a 64-core node dies with "Too many threads

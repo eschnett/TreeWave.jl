@@ -176,9 +176,7 @@ function track_pulse(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
         # per block from the mesh's own per-block reduction, so the data
         # is never read cell by cell from the host; the verdict, which
         # needs the tree, is the loop below.
-        peaks = TreeAMR.block_partials(w -> maximum(abs, w),
-                                       (a, x) -> max(a, abs(x)), zero(T),
-                                       fs.work, fs; g=G, vars=1:1)
+        peaks = block_mapreduce(abs, max, zero(T), fs; vars=1)
         inside = zero(T)
         total = zero(T)
         for b in 1:nblocks(fs)

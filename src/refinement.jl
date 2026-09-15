@@ -105,15 +105,11 @@ first application loop that does not.
 """
 function field_scales(fs::FieldSet{T}; vars=1:fs.nvars) where {T}
     R = real(float(T))
-    G = fs.forest.G
     # One reduction per variable rather than one loop over both: a
     # device reduction is a kernel launch and a launch takes a single
     # variable range, and two launches once per regrid cost nothing
     # against the sweep that follows.
-    return [maximum(TreeAMR.block_partials(w -> maximum(abs, w),
-                                           (a, x) -> max(a, abs(x)), zero(R),
-                                           fs.work, fs; g=G, vars=v:v))
-            for v in vars]
+    return [maximum(block_mapreduce(abs, max, zero(R), fs; vars=v)) for v in vars]
 end
 
 """
