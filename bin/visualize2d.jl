@@ -6,6 +6,7 @@
 #     julia --project=bin bin/visualize2d.jl
 #     julia --project=bin bin/visualize2d.jl --frozen-scales --out=/tmp
 #     julia --project=bin bin/visualize2d.jl --type=f32
+#     julia --project=bin bin/visualize2d.jl --centering=cell
 #     julia --project=bin bin/visualize2d.jl --backend=metal --type=f32
 #
 # A separate script from `visualize.jl` and not a `--dim=2` flag on it,
@@ -90,11 +91,20 @@ function snapshot(fs, t, u; coarsen_tol, scales)
     blocks = map(1:nblocks(fs)) do b
         k = blockkey(fs, b)
         ext = block_extent(forest, k)
+        # Where the samples actually are, asked of the field set rather
+        # than reconstructed from the extent: the first owned point sits
+        # half a spacing inside the block in a cell-centred dimension and
+        # exactly on its low edge in a vertex-like one. Both panels below
+        # derive their geometry from this pair and from nothing else, so
+        # there is one place the centring is read and not two.
+        firstpoint = coordinates(fs, b, ntuple(d -> fs.G[d] + 1, 2))
         # Not transposed: `interiorview` gives `z[i,j]` at `(x_i, y_j)`,
         # which is already `heatmap!`'s convention. Transposing it looks
         # almost right on a radially symmetric field, which is what makes
         # it worth saying.
         (ext=map(e -> (Float64(e[1]), Float64(e[2])), ext),
+         first=map(Float64, firstpoint),
+         h=Float64(spacing(forest, k)),
          u=Float64.(interiorview(fs, b, 1)), lvl=level(k))
     end
     τ = maximum(b -> cell_indicator(fs, b, coarsen_tol; scales=scales)[1],
@@ -107,18 +117,28 @@ One filmstrip panel: the field as one heatmap per block, then the block
 boundaries on top.
 
 The x and y arguments are **cell edges**, `N + 1` of them, and that is
-load-bearing. `block_extent` returns the block's outer edges, but a bare
-`(lo, hi)` tuple is read by `heatmap!` as the centres of the first and
-last cell, which inflates every block by `w/2(N-1)` per side -- 7% at
-`N = 8` -- so the blocks silently overlap and the mesh looks subtly wrong
-rather than broken.
+load-bearing. A bare `(lo, hi)` tuple is read by `heatmap!` as the centres
+of the first and last cell, which inflates every block by `w/2(N-1)` per
+side -- 7% at `N = 8` -- so the blocks silently overlap and the mesh looks
+subtly wrong rather than broken.
+
+The edges are half a spacing either side of the *samples*, not the block's
+outer edges, and the two are the same thing only when the block is
+cell-centred. A vertex-centred block's `N` owned samples run from its low
+edge to `(N-1)h` past it, so the cells drawn around them are shifted down
+by `h/2`: they still tile exactly between same-level neighbours -- one
+block's last half-cell meets the next one's first -- but they sit half a
+spacing off the block outlines, which is what half-open ownership looks
+like when it is drawn. Deriving the edges from `block_extent` instead
+would put every vertex-centred sample half a cell from where it is.
 """
 function fieldpanel!(ax, snap; colorrange, colorscale)
     local hm
     for b in snap.blocks
         N = size(b.u, 1)
-        hm = heatmap!(ax, range(b.ext[1][1], b.ext[1][2]; length=N + 1),
-                      range(b.ext[2][1], b.ext[2][2]; length=N + 1), b.u;
+        edges(d) = range(b.first[d] - b.h / 2, b.first[d] + (N - 0.5) * b.h;
+                         length=N + 1)
+        hm = heatmap!(ax, edges(1), edges(2), b.u;
                       colormap=:balance, colorrange=colorrange,
                       colorscale=colorscale)
     end
@@ -163,10 +183,16 @@ function radialpoints(snap, L, x₀)
     for b in snap.blocks
         N = size(b.u, 1)
         c = levelcolor(b.lvl)
-        h = (b.ext[1][2] - b.ext[1][1]) / N
+        h = b.h
+        # From the block's first owned point, which `snapshot` asked the
+        # field set for. The old spelling, `ext[1] + (i - 1/2)h`, is the
+        # cell-centred case written out, and on a vertex-centred run it
+        # would put every point half a spacing too far out -- which in
+        # this panel reads as a fan, that is, as exactly the error the
+        # panel exists to show.
         for j in 1:N, i in 1:N
-            x = b.ext[1][1] + (i - 0.5) * h
-            y = b.ext[2][1] + (j - 0.5) * h
+            x = b.first[1] + (i - 1) * h
+            y = b.first[2] + (j - 1) * h
             dx = mod(x - x₀[1] + L / 2, L) - L / 2
             dy = mod(y - x₀[2] + L / 2, L) - L / 2
             push!(rs, hypot(dx, dy))
@@ -287,10 +313,9 @@ indicator refines the entire domain by the second frame.
 function blastcase(::Type{T}=Float64; N=8, L=one(T), roots=8, σ=T(2//25),
                   t_end=T(2//5), chunk=T(1//50), n=1, ops_order=4,
                   refine_tol=T(3//10), coarsen_tol=T(3//40),
-                  refresh_scales=true, backend=CPU()) where {T}
-    # G is set by the operator order, not chosen independently: TreeAMR
-    # requires G >= prolongation/2 for point-value operators.
-    G = ops_order ÷ 2
+                  refresh_scales=true, centering=vertexcentered(2),
+                  backend=CPU()) where {T}
+    G = viewer_ghosts(ops_order, centering)
     x₀ = (L / 2, L / 2)
     snaps = []
     # Mirror the driver's scale policy rather than re-deriving it: frozen
@@ -312,16 +337,16 @@ function blastcase(::Type{T}=Float64; N=8, L=one(T), roots=8, σ=T(2//25),
                     ops=Operators(prolongation=ops_order,
                                   restriction=ops_order),
                     t_end=t_end, chunk=chunk, refine_tol=refine_tol,
-                    coarsen_tol=coarsen_tol,
+                    coarsen_tol=coarsen_tol, centering=centering,
                     refresh_scales=refresh_scales, backend=backend,
                     observer=observer)
     what = refresh_scales ? "refinement tracks it" :
            "amplitude scale frozen — the criterion refines everything"
-    title = @sprintf("Radial blast wave, σ = %.3g, %s — %s\nworst L∞ = %.3g, \
+    title = @sprintf("Radial blast wave, σ = %.3g, %s, %s — %s\nworst L∞ = %.3g, \
                       %d blocks at maxlevel %d (×%.1f), %.0f%% of the ring \
                       at the finest level",
-                     σ, T, what, r.worst, r.nblocks, r.maxlevel, r.growth,
-                     100 * r.covered)
+                     σ, T, centeringname(centering), what, r.worst, r.nblocks,
+                     r.maxlevel, r.growth, 100 * r.covered)
     # The free-space radial solution at the final time, straight from the
     # Hankel table rather than sampled along a ray through the box: a ray
     # would leave the domain past r = L/2 and the periodic image sum would
@@ -340,6 +365,23 @@ end
 # would be an invitation to a confusing failure.
 const FLOATTYPES = Dict("f32" => Float32, "f64" => Float64)
 
+# `--centering=` selects where the values sit. Vertex is the default, as
+# it is throughout the package; `cell` renders the comparison.
+const CENTERINGS = Dict("vertex" => vertexcentered, "cell" => cellcentered)
+
+centeringname(centering) = all(==(:vertex), centering) ? "vertex-centred" :
+                           "cell-centred"
+
+"""
+The ghost width the operator order needs, which is not a free choice and
+is not the same on both layouts: order-`p` prolongation reaches `p/2`
+planes past a cell-centred interface and `p/2 - 1` planes past a vertex
+dimension's shared plane, and the Laplacian needs one either way. See
+"Operator order" in `CODE.md`.
+"""
+viewer_ghosts(ops_order, centering) =
+    max(1, ops_order ÷ 2 - (all(==(:vertex), centering) ? 1 : 0))
+
 function main(args)
     outdir = joinpath(@__DIR__, "output")
     n = 1
@@ -347,6 +389,8 @@ function main(args)
     refresh_scales = true
     T = Float64
     typetag = ""
+    centeringtag = ""
+    centering = vertexcentered(2)
     backendname = "cpu"
     # Sixel is for a human looking at a terminal; a pipe gets the paths.
     inline = stdout isa Base.TTY
@@ -365,6 +409,14 @@ function main(args)
             # The default type keeps the plain filename, so a Float32 render
             # never overwrites the figure CI checks.
             typetag = tag == "f64" ? "" : "_$tag"
+        elseif startswith(a, "--centering=")
+            tag = a[13:end]
+            haskey(CENTERINGS, tag) ||
+                error("--centering must be vertex or cell; got $tag")
+            centering = CENTERINGS[tag](2)
+            # As with --type=, the default keeps the plain filename so a
+            # cell-centred render never overwrites the figure CI checks.
+            centeringtag = tag == "vertex" ? "" : "_$tag"
         elseif startswith(a, "--backend=")
             backendname = a[11:end]
         elseif a == "--frozen-scales"
@@ -375,8 +427,8 @@ function main(args)
             inline = false
         else
             error("unknown argument $a; expected --out=, --n=, --ops=, \
-                   --type=, --backend=, --frozen-scales, --display, \
-                   --no-display")
+                   --type=, --centering=, --backend=, --frozen-scales, \
+                   --display, --no-display")
         end
     end
 
@@ -387,13 +439,13 @@ function main(args)
     # is a figure, drawn from the host copies `snapshot` already took.
     c = withbackend(backendname, T) do backend
         blastcase(T; n=n, ops_order=ops_order, refresh_scales=refresh_scales,
-                  backend=backend)
+                  centering=centering, backend=backend)
     end
     fig = makefigure(c.snaps, c.profile, c.L, c.x₀, c.title; tols=c.tols,
                      tracking=c.tracking)
     path = joinpath(outdir,
                     (refresh_scales ? "blast_2d" : "blast_2d_frozen") *
-                    typetag * ".png")
+                    typetag * centeringtag * ".png")
     save(path, fig)
     inline && display(fig)
     println("wrote $path")

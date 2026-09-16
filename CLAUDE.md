@@ -72,11 +72,18 @@ nearly all of it compiling the two firing kernels.
 
 ## Things that have bitten before
 
-- **TreeAMR is pinned to the GitHub `main`, not to the local checkout.** A
+- **TreeAMR is pinned to a GitHub branch, not to the local checkout.** A
   `~/src/jl/TreeAMR` working copy is *not* what is being tested. If a
   TreeAMR change is needed, say so rather than editing that checkout and
   assuming the tests see it. Note the remote has no `master` branch — only
-  `main` and `gh-pages`.
+  `main`, `m8` and `gh-pages`.
+- **The pin is currently `rev = "m8"`, in both `Project.toml` and
+  `bin/Project.toml`.** M8 is what moved `G` onto the field set, added
+  centerings, and changed `GhostSchedule` and `regrid!`; nothing here
+  builds against TreeAMR's `main` until `m8` is merged there. Flipping
+  both back to `rev = "main"` is the last commit before merging this, and
+  it turns CI red until upstream's `main` has M8 — so it is the user's
+  call, not a tidy-up.
 - **`[sources]` in `Project.toml` is what makes a clean checkout resolve.**
   TreeAMR is unregistered and `Manifest.toml` is untracked, so without it
   `Pkg.instantiate()` fails with "expected package TreeAMR to be
@@ -104,13 +111,30 @@ nearly all of it compiling the two firing kernels.
   a keyword of that name shadows it inside the function body; `maxlevel(forest)`
   then tries to call an integer. The keyword here is `maxlevel_cap`, which also
   says what it is — at calibrated tolerances it never binds.
-- **Order-4 operators and `G = 2` are required** for 2nd-order
-  convergence on a refined mesh, even though the RHS stencil reaches only
-  one cell. This is TreeAMR's interface-order rule; `CODE.md` explains it.
-  Never give `ops` or `G` a default that hides it.
-- `cell_center(forest, key, idx)` indexes the **stored** array, so
-  interior cell `i` is `idx = i + G`. Off-by-`G` here produces plots that
-  look almost right.
+- **Order-4 prolongation is required** for 2nd-order convergence on a
+  refined mesh, even though the RHS stencil reaches only one cell. This is
+  TreeAMR's interface-order rule; `CODE.md` explains it. What it costs
+  depends on the centering: vertex-centred needs `G = 1` and is indifferent
+  to the restriction order (injection along a stagger has no order to
+  raise); cell-centred needs `G = 2` *and* order-4 restriction, and refuses
+  `G = 1` outright. Never give `ops` or `G` a default that hides it.
+- **Vertex centring is the default, and cell-centred is kept as the
+  comparison.** Every driver takes `centering`, defaulting to
+  `vertexcentered(D)`; the `test/*_cell_tests.jl` files run the same
+  studies at `cellcentered(D)` with the numbers that were measured before
+  the switch. Do not delete one half to make a change smaller — the
+  agreement between them is a measurement, and it needs both halves to
+  keep making it.
+- `coordinates(fs, b, idx)` — which replaced `cell_center` in M8 — indexes
+  the **stored** array, so owned point `i` is `idx = i + fs.G[d]`. It takes
+  the *field set* because the answer depends on the ghost width and the
+  centering and the forest carries neither. Off-by-`G`, or reconstructing a
+  position as `origin + (i - 1/2)h` instead of asking, produces plots that
+  look almost right — and on a vertex mesh the second one is wrong by half
+  a spacing everywhere.
+- **`fs.G` is an `NTuple{D,Int}`, not an `Int`.** Every misuse happens to
+  fail loudly (`Int + NTuple` is a `MethodError`), which is the only
+  pleasant thing about the migration. `fs.forest.G` no longer exists.
 - **`Base` is not generic even though the mesh is.** MultiFloats defines no
   `rem` (so `mod` throws), no conversion to `Integer` (so `ceil(Int, x)`
   throws), and a conversion only to its own limb type (so
@@ -152,11 +176,13 @@ nearly all of it compiling the two firing kernels.
   version of the same problem: `prod(… for d in 1:D)` was replaced by an
   accumulating loop, which is the shape TreeAMR's own device-tested
   closures use.
-- **A schedule belongs to the field set's backend, and a regrid rebuilds
-  it.** `GhostSchedule(forest, ops)` after a `regrid!` builds a *host*
-  schedule whose stencils the transfer kernel cannot read; pass
-  `T=T, backend=backend` at every rebuild, not only at construction. The
-  error is good ("the wrong memory") but it arrives a chunk later.
+- **A schedule belongs to a *layout*, and a regrid rebuilds it.** Write
+  `GhostSchedule(fs, ops)`, which takes the ghost width, centering, element
+  type and backend from the field set; the forest form still exists but now
+  needs all four spelled out and is the way to get a subtly wrong schedule.
+  `regrid!` takes `fs => schedule` pairs for the same reason — a bare field
+  set no longer says which schedule moves it — and rejects the M6 spelling
+  by name rather than with a `MethodError`.
 - **Loading a device package inside `main` is a world-age bug**, and it
   has two symptoms, not one. `allocate` falls through to
   KernelAbstractions' generic method and throws a `MethodError` naming a

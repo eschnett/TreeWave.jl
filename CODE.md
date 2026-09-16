@@ -26,6 +26,11 @@ application.
   nowhere to go. See Precision.
 - Run where the caller's storage is, not only on the host — same argument,
   one milestone later. See Running on a device.
+- Run where the caller's *values* are, not only at cell centres — the same
+  argument a milestone later again, and the one that pays back rather than
+  merely generalizing: the wave equation's natural layout is vertex
+  centring, and adopting it makes the interface-order rule cheaper. See
+  Centerings.
 
 ## Scope and non-goals
 
@@ -38,7 +43,12 @@ application.
   whose feature *loses amplitude*, and that is what puts the refinement
   criterion's noise floor under strain rather than merely exercising it.
 - **Non-conservative at coarse-fine interfaces.** The wave equation does
-  not need flux matching, and TreeAMR defers it to its M8 anyway.
+  not need flux matching. TreeAMR's M8 delivers it — `InterfaceSchedule`
+  and `restrict_interfaces!`, measured upstream on Burgers' equation — and
+  this package deliberately does not use it: there is no flux here to
+  restrict. Second-order form is not a conservation law, and reaching for
+  the machinery anyway would misrepresent what it is for. The half of M8
+  this package *does* use is the other one, Centerings.
 
 ## The equation
 
@@ -54,6 +64,12 @@ Second-order form rather than first-order is deliberate: it makes the
 initial data trivially exact for both test problems, and it puts a
 *second* derivative in the RHS, which is what makes the interface-order
 rule below bite. A first-order system would hide it.
+
+The kernel takes no centering, and that is a claim rather than an
+omission: it reads its own point and its two neighbours a spacing away,
+which is the same stencil wherever those points sit. Everything the
+stagger changes happens at a coarse-fine interface, inside the mesh. See
+Centerings.
 
 ## The right-hand-side contract
 
@@ -78,8 +94,11 @@ everything invariant out of the per-evaluation path: the field set, the
 ghost schedule, the per-block spacings, and — as `Val{D}` and `Val{G}` —
 the two parameters the kernel specializes on. Building the `Val`s per
 evaluation instead would recompile or dynamically dispatch the kernel on
-every RK stage. `G` is read from a runtime field, so the *constructor* is
-type-unstable by design; it is called once per chunk, never per step.
+every RK stage. `G` is read from a runtime field — `fs.G`, an
+`NTuple{D,Int}` since M8, one width per dimension — so the *constructor*
+is type-unstable by design; it is called once per chunk, never per step.
+There is no `Val{C}`: the centering never reaches the kernel, because the
+stencil does not depend on it. See Centerings.
 
 ## Initial conditions
 
@@ -222,6 +241,103 @@ quadrature's own error is ~9e-7, four orders below the finest
 discretization error, so what the comparison measures is the scheme and
 not the table.
 
+## Centerings
+
+A field set carries, per dimension, whether its values sit at cell centres
+(`:cell`) or on cell boundaries (`:vertex`). This package runs
+**vertex-centred by default**, and keeps the cell-centred layout
+reachable, tested and measured beside it.
+
+Vertex centring is not a generalization taken for its own sake. It is the
+layout a wave equation wants, and the reason is the interface-order rule
+below: along a vertex-like dimension restriction is exact **injection**,
+so the restriction order stops entering the global rate at all, and
+prolongation reaches one plane less, so `G = 1` suffices at order 4 where
+cell centring needs 2. A smaller ghost width on the same mesh is a
+smaller working array — `N + 2G + 1` stored points against `N + 2G`, which
+at `N = 8` is 11 against 12 per dimension — and one fewer operator whose
+order has to be got right.
+
+**What a stagger changes, and what it does not.** A vertex-like dimension
+stores one plane more, the boundary plane a block *shares* with its
+high-side neighbour, and the exchange fills it exactly as it fills a
+ghost. Ownership stays half-open: a block owns its points `0 … N-1` in
+every dimension, so the state vector still holds `N^D` values per block
+per variable. That is why so little here moved:
+
+| | cell-centred | vertex-centred |
+|---|---|---|
+| owned points per block per dimension | `N` | `N` |
+| stored points per dimension | `N + 2G` | `N + 2G + 1` |
+| state-vector length | `N^D·nvars·nblocks` | the same |
+| position of owned point `i` | `origin + (i - ½)h` | `origin + (i-1)h` |
+| restriction at an interface | order-`p` stencil | injection |
+| `G` needed at prolongation order `p` | `p/2` | `p/2 - 1` |
+
+Nothing in the physics knows which it is. `wave_rhs_kernel!` takes no
+`Val(C)`, `WaveProblem` carries none, the Löhner sweep walks the same
+`1:N` owned points, and the boxes it reports mean the same thing. Every
+driver gained a `centering` keyword and passes it to its field sets, and
+that is all any of them do with it.
+
+The rest of the port is M8's *other* change and would have been needed
+with no stagger at all: `fs.G` is an `NTuple{D,Int}` rather than an `Int`
+and lives on the field set, a `GhostSchedule` is built from the field set
+because it belongs to a layout, `regrid!` takes `fs => schedule` pairs
+because a bare field set no longer says which schedule moves it, and
+`hostcopy` has to reproduce the whole layout rather than just the forest.
+Every one of those fails loudly if missed, which is the pleasant half.
+
+Three places did have to learn the difference, and all three are about
+*where a value is*, not about what is done to it:
+
+- `coordinates(fs, b, idx)` replaced `cell_center`, and takes the field
+  set rather than the forest, because the answer depends on the ghost
+  width and the centering and the forest carries neither.
+- The 1D viewer asks `coordinates` for its x values instead of adding
+  `h/2` to a block origin.
+- The 2D viewer draws each sample's own dual cell — half a spacing either
+  side of the sample — rather than spanning the block extent with `N+1`
+  edges. On a vertex mesh those cells are offset half a spacing from the
+  block outlines, which is what half-open ownership looks like when it is
+  drawn, and the cells still tile exactly between same-level neighbours.
+  The radial panel is the check: a half-cell error there fans the curve
+  out, which is indistinguishable at a glance from a discretization
+  defect.
+
+**What it costs.** Nothing measurable. Every convergence rate, every block
+count, every coverage fraction comes out the same on both layouts — the
+blast wave reaches 820 blocks with growth `6.029411764705882` on each, to
+the last digit — and the errors differ in the third significant figure.
+The two columns are tabulated under [Measured
+results](#measured-results). The cell-centred studies are kept as
+`test/sinewave_cell_tests.jl`, `test/supergaussian_cell_tests.jl` and
+`test/blast_cell_tests.jl`, running the identical assertions with the
+centering said out loud, and both viewers take `--centering=cell`.
+
+Keeping them is not caution. The pulse is the control — a travelling
+Gaussian aligned with nothing, where the two layouts must agree, so a
+disagreement there is the port and not the physics — and the blast wave
+is the case where they might not have: its peak sits at the centre of the
+box, which is a grid *point* on a vertex mesh, sampled at exactly 1.0, and
+a block corner on a cell-centred one. That they agree anyway is a
+measurement, and one that needs both halves present to keep making.
+
+**A word on words.** The mesh still has *cells* — a block is `N^D` of
+them per dimension, and `h` is their width — whatever the centering; what
+changes is whether a stored value sits at a cell's centre or on its
+corner. This document says "point" where the distinction matters (an
+owned point, a stored point, the `N^D` the state vector holds) and
+"cell" where it does not (the mesh, the spacing, a per-cell kernel).
+`refinement.jl` reports boxes in cell indices `1:N` and means the owned
+points with those indices; the two numberings coincide because a block
+owns exactly `N` of each.
+
+**What this package does not use.** M8's other half is conservation at
+coarse-fine faces — a flux field set with a vertex-like centring in the
+face dimension, `G = 0`, and `restrict_interfaces!`. There is no flux in
+second-order form, so none of it appears here. See Scope and non-goals.
+
 ## Operator order: the constraint inherited from TreeAMR
 
 TreeAMR's interface-order rule is why every driver here takes `ops` and
@@ -229,21 +345,48 @@ TreeAMR's interface-order rule is why every driver here takes `ops` and
 operator carries an `O(hᵖ)` error; the 2nd-order Laplacian divides it by
 `h²`, leaving `O(h^(p-2))` along every coarse-fine interface. With `p = 2`
 that is `O(1)` and drags the global rate to **first** order even though
-the interior scheme is second order.
+the interior scheme is second order. So the global rate is
+`min(2, p - 1)`: **first** order at `p = 2`, second at `p = 4`, on either
+layout.
 
-So 2nd-order global convergence on a refined mesh needs **order-4
-prolongation and restriction, and `G = 2`** — even though the RHS stencil
-itself only ever reaches one cell. Raising one operator alone does not
-help, because the two sides of an interface get their ghosts from
-different operators. `test/sinewave_tests.jl` asserts all four
-combinations, so the rule is guarded here and not merely documented.
+What the centering changes is which `p`, and how much ghost it costs:
+
+| | needs | because |
+|---|---|---|
+| cell-centred | order-4 prolongation **and** restriction, `G = 2` | the two sides of an interface get their ghosts from different operators, so raising one alone leaves the other first order |
+| vertex-centred | order-4 prolongation, **any** restriction, `G = 1` | restriction along a stagger is injection — a coincident fine point copied, exact for arbitrary data, with no order to raise |
+
+Both are asserted rather than documented. `test/sinewave_cell_tests.jl`
+checks all four operator combinations at `G = 2`, and
+`test/sinewave_tests.jl` checks them at `G = 1` and then makes the
+stronger claim the vertex row implies: the two restriction orders are not
+merely equally accurate, they are **the same computation**, `l2 === l2`.
+It also asserts that `G = 1` and `G = 2` give bit-identical answers at
+order 4 — the second ghost plane buys nothing, not almost nothing — and
+that `G = 1` with `cellcentered(D)` is refused outright.
+
+Measured rates, `D = 1` and `D = 2`, two-level mesh:
+
+| prolongation | restriction | vertex, `G = 1` | cell, `G = 2` |
+|---|---|---|---|
+| 2 | 2 | 0.99 / 1.01 | 1.0 |
+| 2 | 4 | 0.99 / 1.01 | below 1.5 |
+| 4 | 2 | 1.99 / 1.99 | below 1.5 |
+| 4 | 4 | 1.99 / 1.99 | 2.0 |
+
+The vertex column gives `D = 1` and `D = 2`; the cell column is `D = 1`
+only, which is what its testset has always asserted, and the two
+off-diagonal rows there are asserted as "below 1.5" rather than as a
+number because what matters is that raising one order alone does not
+reach 2. The vertex rows come in pairs because they are the same run.
 
 ## Precision
 
 TreeAMR's mesh is generic in its floating-point type: `Forest{D,T}` carries
 the type the *geometry is computed in*, not merely stored in, and `FieldSet`
-and `GhostSchedule` default their element type to the forest's. This package
-follows it, so that a run can be done at `Float32` — the point being test runs
+defaults its element type to the forest's, with `GhostSchedule` taking the
+field set's. This package follows it, so that a run can be done at
+`Float32` — the point being test runs
 on a device with no hardware fp64, which is exactly what a low-end GPU is —
 or at a MultiFloats type, which is a software float and therefore evidence
 that no fp64 path is load-bearing anywhere.
@@ -256,7 +399,7 @@ reduced-precision option on such a device but the only one there is. See
 Every driver takes the type as a **leading positional argument**, spelled as
 TreeAMR spells `spacing(T, forest, level)`:
 
-    wave_errors(Float32, Val(1); N=16, G=2, ops=ops)
+    wave_errors(Float32, Val(1); N=16, G=1, ops=ops)
     track_pulse(Float32, Val(1); roots=8, N=8)
     track_blast(Float32, Val(2))
 
@@ -308,6 +451,17 @@ The `BigFloat` fallbacks allocate, which is why they are confined to what they
 convert: loop counts, evaluated a handful of times per run, and one subscript
 into a `Float64` lookup table. A hardware float never reaches them.
 
+One further gap is not bridged, because nothing in the package should be
+relying on it: **MultiFloats' division is not correctly rounded**, so `x / x`
+is not always exactly one. Measured, it differs from one by an ulp for about
+an eighth of `Float32x2` values. That surfaced in exactly one place —
+`track_pulse`'s `tracking`, a ratio of two amplitudes which are the *same
+number* whenever the peak sits in a refined block — where the exact claim
+`tracking == 1` is true of the run and false of the arithmetic.
+`test/type_tests.jl` therefore makes the exact claim at a hardware float and
+the approximate one at a MultiFloat, naming the reason. It is a property of
+the software float, and a fair thing for the software-float probe to find.
+
 ### What each type is for, and what is not available
 
 | type | what it catches |
@@ -349,16 +503,31 @@ criterion chooses.
 That last one is the claim worth having, and it holds. Measured, at the
 calibrated tolerances:
 
+Vertex-centred, which is the default:
+
+| run | `Float64` | `Float32` |
+|---|---|---|
+| pulse, `t_end = 0.5` | L∞ 0.09605, 16 blocks, level 2 | L∞ 0.09704, 16 blocks, level 2 |
+| blast, `t_end = 0.4` | L∞ 0.029104, 136 → 820 blocks, 91.05% covered | L∞ 0.029168, 136 → 820 blocks, 91.05% covered |
+| sine, `N = 8`, two levels | L2 0.0033486, L∞ 0.0077755 | L2 0.0033486, L∞ 0.0077748 |
+
+Cell-centred, the same runs:
+
 | run | `Float64` | `Float32` |
 |---|---|---|
 | pulse, `t_end = 0.5` | L∞ 0.09609, 16 blocks, level 2 | L∞ 0.09687, 16 blocks, level 2 |
-| blast, `t_end = 0.4` | L∞ 0.0297, 136 → 820 blocks, 91% covered | L∞ 0.0298, 136 → 820 blocks, 91% covered |
+| blast, `t_end = 0.4` | L∞ 0.029713, 136 → 820 blocks, 91.10% covered | L∞ 0.029778, 136 → 820 blocks, 91.10% covered |
 | sine, `N = 8`, two levels | L2 0.0033392, L∞ 0.0074446 | L2 0.0033391, L∞ 0.0074439 |
 
 The blast wave agrees on the block count, the depth *and* the coverage
 fraction — the refinement criterion's decisions are precision-insensitive even
 where the error is not, which is what makes a `Float32` run a rehearsal for
-the `Float64` one rather than a different experiment.
+the `Float64` one rather than a different experiment. The coverage fractions
+are identical to their last digit *within* a column and differ between the
+columns only in the fourth: `0.9105206073752712` vertex against
+`0.9109663409337676` cell-centred. So the criterion's decisions are
+layout-insensitive too, very nearly but not exactly — which is the honest
+statement, since the two layouts do sample different points.
 
 ## The refinement criterion
 
@@ -449,15 +618,15 @@ notch by construction.
 ### Calibrated thresholds
 
 Löhner's canonical `τ > 0.8` is a shock detector; smooth data never comes close, so
-the thresholds had to be measured. Max τ over the pulse (σ = 0.08) on uniform
-meshes at `roots = 8`, against the depth the criterion then reaches when the cap is
-set to 6 so that the *indicator* has to be what stops it:
+the thresholds had to be measured. Max τ over the pulse's **initial data**
+(σ = 0.08) on uniform meshes at `roots = 8`, against the depth the criterion then
+reaches when the cap is set to 6 so that the *indicator* has to be what stops it:
 
-| level | h | measured max τ |
-|---|---|---|
-| 0 | 1/64 | 0.794 |
-| 1 | 1/128 | 0.478 |
-| 2 | 1/256 | 0.192 |
+| level | h | max τ, vertex | max τ, cell |
+|---|---|---|---|
+| 0 | 1/64 | 0.770 | 0.794 |
+| 1 | 1/128 | 0.495 | 0.478 |
+| 2 | 1/256 | 0.197 | 0.192 |
 
 | refine_tol | depth reached (cap 6) | blocks | cells |
 |---|---|---|---|
@@ -465,6 +634,8 @@ set to 6 so that the *indicator* has to be what stops it:
 | 0.20 | 2 | 16 | 128 |
 | 0.30 | 2 | 16 | 128 |
 | 0.45 | 2 | 16 | 128 |
+
+The depth table is the same on both layouts, row for row.
 
 Any `refine_tol` in `[0.20, 0.45]` terminates at level 2, so the defaults are
 `refine_tol = 0.30`, `coarsen_tol = 0.075` — mid-plateau, with the cap never
@@ -593,41 +764,55 @@ of any recorded L2 number. And the workload uses only `Base` and the
 package (`hash`, `repr`), so it runs from the root environment as well as
 from `test/`, which is what makes a mismatch bisectable.
 
+The workload runs vertex-centred only, and that is deliberate rather than
+an omission. Thread determinism is a property of the *shapes* of the
+reductions — one slot per block, combined in a fixed order — and a
+centering changes none of them: the same blocks, the same `N^D` owned
+points, the same partial arrays. A second workload would double the
+test's ten seconds, most of which is a subprocess paying Julia's startup
+again, and buy no claim that the first does not already make.
+
 ### What it buys, and what caps it
 
 Measured on one exclusive node of Symmetry's `amddebugq` — 64-core AMD
 EPYC, 8 NUMA domains, no SMT — on a two-level 2D mesh of **1792 blocks of
-128², 29.4M cells**, a 476 MB working array and a 470 MB state vector.
-Speedups against one thread, with the default first-touch page placement,
-and at 64 threads also with the pages interleaved
-(`numactl --interleave=all`). Both columns come from the same node in the
-same job, because two nominally identical nodes measured 20% apart:
+128², 29.4M points**, a 484 MiB working array and a 448 MiB state vector,
+vertex-centred at `Float64`. Speedups against one thread at the same page
+placement, with the default first touch and with the pages interleaved
+(`numactl --interleave=all`). Both placements come from the same node in
+the same job, because two nominally identical nodes measured 20% apart:
 
 | phase | 8t | 16t | 32t | 64t | 64t interleaved |
 |---|---|---|---|---|---|
-| RK4 step (`solve`) | 3.07 | 3.68 | 3.42 | **3.57** | 3.24 |
-| RHS evaluation | 7.28 | 14.25 | 15.25 | **17.7** | 12.1 |
-| stage broadcast | 1.00 | 1.00 | 1.01 | **0.92** | 1.01 |
-| initial data | 7.84 | 15.67 | 30.94 | **37.3** | 36.4 |
-| refinement flags | 8.00 | 16.12 | 32.20 | **33.9** | 28.0 |
-| amplitude scales | 7.35 | 14.28 | 4.63 | **5.7** | 5.2 |
-| exact ring (`blast_exact`) | 7.75 | 15.65 | 31.43 | **46.3** | 44.2 |
-| Hankel table | 7.46 | 14.97 | 29.18 | **39.0** | 45.9 |
-| Hankel contraction | 1.60 | 1.82 | 1.13 | **2.1** | 2.2 |
-| coverage reduction | 1.86 | 2.03 | 1.94 | **1.8** | 1.8 |
+| RK4 step (`solve`) | 3.32 | 3.56 | 3.62 | **3.58** | 3.50 |
+| RHS evaluation | 7.84 | 12.2 | 14.0 | **12.7** | 16.7 |
+| stage broadcast | 1.01 | 1.01 | 1.08 | **0.99** | 0.99 |
+| initial data | 8.17 | 16.4 | 31.5 | **40.2** | 63.5 |
+| refinement flags | 3.93 | 4.04 | 3.70 | **3.35** | 3.37 |
+| amplitude scales | 7.99 | 15.7 | 9.72 | **8.13** | 6.18 |
+| exact ring (`blast_exact`) | 7.99 | 15.6 | 31.0 | **48.4** | 46.6 |
+| Hankel table | 7.62 | 14.6 | 29.6 | **38.3** | 54.6 |
+| Hankel contraction | 1.63 | 2.15 | 1.28 | **2.28** | 2.70 |
+| coverage reduction | 8.02 | 14.4 | 10.6 | **12.3** | 13.9 |
+
+The runs behind it are vertex-centred, and the sweep was not repeated
+cell-centred: the per-phase device table measures both layouts on the same
+machine and finds them equal to within the run-to-run spread, and
+parallelism has no more reason than arithmetic does to care where inside a
+cell a value sits.
 
 **The mesh scales and the step does not, and that is the result.** The
 right-hand side — scatter, ghost fill and the Laplacian kernel, which is
-all this application asks the mesh for — reaches 17.7×. A whole RK4 step
-reaches 3.6× and stops there, by 16 threads. The arithmetic is not
-mysterious: at one thread, four RHS evaluations are 2.34 s of a 3.05 s
-step, the four stage broadcasts are 0.29 s, and the remaining 0.43 s is
-the integrator's own copying; at 64 threads the same step is 0.855 s, of
-which the RHS is 0.13 and the other 0.72 — 84% — is serial.
-`OrdinaryDiffEq` does its stage arithmetic as ordinary broadcasts over the
-state vector, and the benchmark times one of them directly
-(`stage_broadcast`, flat at 1.0× across the whole sweep) precisely so the
-ceiling is a measured number and not an inference.
+all this application asks the mesh for — reaches 12.7× (16.7×
+interleaved). A whole RK4 step reaches 3.6× and stops there, by 16
+threads. The arithmetic is not mysterious: at one thread, four RHS
+evaluations are 2.44 s of a 3.15 s step and the four stage broadcasts are
+0.28 s, so the rest is the integrator's own copying; at 64 threads the
+same step is 0.878 s, of which the RHS is 0.19 and the other 0.69 — 79% —
+does not scale. `OrdinaryDiffEq` does its stage arithmetic as ordinary
+broadcasts over the state vector, and the benchmark times one of them
+directly (`stage_broadcast`, flat at 1.0× across the whole sweep)
+precisely so the ceiling is a measured number and not an inference.
 
 The obvious fix is one keyword — `RK4(thread = True())`, which sends those
 same broadcasts through Polyester — and it is **worse**: measured at eight
@@ -640,46 +825,77 @@ statement is not "we could turn it on" but "the stage updates have to join
 the pool that is already running" — which means a time integrator written
 as kernels, listed under Possible extensions rather than done.
 
-**Interleaving the pages did nothing here, and upstream measured 2–6×.**
-That is a contradiction, recorded rather than smoothed over. At 64
-threads the RHS is *slower* interleaved (0.033 s against 0.047), the
-initial-data and exact-ring passes are unchanged to within a percent, and
-only the Hankel table — the one array this package fills itself, with a
-plain `Matrix` — prefers it. The likely reason is that every large array
-here gets a good first touch for free: `FieldSet` and `statevector`
-allocate untouched pages, and the first thing to write them is a threaded
-kernel partitioned by block, which is how every later kernel partitions
-them too. TreeAMR's finding stands for the case it was measured on; it
-does not follow automatically downstream, and the two-placement sweep is
-in `bin/benchmark.sbatch` so the question can be re-asked on another
-machine rather than assumed.
+**Interleaving the pages helps, and an earlier reading of this table said
+it did not.** That earlier entry recorded "the RHS is *slower*
+interleaved (0.033 s against 0.047)" and concluded that TreeAMR's 2–6×
+did not reproduce downstream. The two seconds in it are almost exactly
+what this sweep measures — 0.0365 interleaved against 0.0479 default at
+64 threads — but they are the *interleaved* figure first, so they say the
+opposite of the sentence around them. The conclusion was drawn from a
+transposition, and it is withdrawn: at 64 threads interleaving makes the
+RHS 24% faster, initial data 37% faster (0.0484 against 0.0763) and the
+Hankel table 29% faster, while the whole step is 2% slower and the
+per-block reductions are a wash. That is smaller than upstream's 2–6× and
+in the same direction, which is the unremarkable answer the first reading
+turned into a puzzle.
+
+The reason the effect is modest here is still worth keeping: every large
+array gets a good first touch for free, because `FieldSet` and
+`statevector` allocate untouched pages and the first thing to write them
+is a threaded kernel partitioned by block, which is how every later
+kernel partitions them too. The two-placement sweep stays in
+`bin/benchmark.sbatch` so the question can be re-asked on another machine
+rather than assumed — and, on this evidence, so that a sign error in
+reading it is caught the next time rather than the time after.
 
 Three phases do not scale, and the reasons differ. The stage broadcast is
-serial by construction, above. The Hankel contraction and the coverage
-reduction are memory-bound passes over tens of megabytes, which saturate
-at 2× however many threads are added. And the amplitude scales are erratic
-at high counts — 14.3× at 16 threads, 5.7× at 64 — because at that point
-the pass itself is 5 ms and the cost of spawning is not negligible against
-it; it is once per regrid, so this is left alone rather than given a
-grain-size heuristic.
+serial by construction, above. The Hankel contraction is a memory-bound
+pass over tens of megabytes, which saturates at 2× however many threads
+are added. And the amplitude scales and the coverage reduction are erratic
+at high counts — 15.7× at 16 threads and 8.1× at 64 for the scales —
+because at that point the pass itself is a few milliseconds and the cost
+of spawning is not negligible against it; both are once per regrid, so
+this is left alone rather than given a grain-size heuristic.
 
-The compute-bound phases behave as they should: initial data 37×, the
-exact ring 46×, the Hankel table 39× — all more than the memory-bound RHS,
-and the last two more than linear, which is what happens when one thread's
-working set is limited by one NUMA domain's bandwidth and 64 threads'
-is not.
+**The refinement flags are the row that changed, and the port is not
+why.** They reach 3.9× at 8 threads and then *fall* — 4.04, 3.70, 3.35 —
+where the entry here previously recorded 8.00× and 33.9×. That was worth
+attributing rather than overwriting, so it was measured directly: the
+pre-M8 package, at its own TreeAMR pin and cell-centred, was run beside
+this one **in a single job on a single node**, and
+
+| phase | pre-M8, cell | this, vertex |
+|---|---|---|
+| `refine_flags`, 1 → 16 threads | 2.378 → 0.664 s (3.58×) | 2.388 → 0.697 s (3.43×) |
+| `initial_data`, 1 → 16 | 3.071 → 0.191 s (16.1×) | 3.069 → 0.193 s (15.9×) |
+| `rhs`, 1 → 16 | 0.582 → 0.0474 s (12.3×) | 0.613 → 0.0533 s (11.5×) |
+
+— so the old figure does not reproduce for the *old code* either, on this
+machine today. Whatever changed is the machine or the Julia version, not
+M8 and not the stagger. The shape of the curve says a serial remainder of
+roughly 0.6 s in a 2.4 s pass, which is what `flag_blocks` boxing 1792
+`(flag, box)` tuples into a `Vector{Any}` and then narrowing it would look
+like; that code is upstream's and unchanged. Recorded as a number that
+moved and is only half explained, rather than quietly replaced.
+
+The compute-bound phases behave as they should: initial data 40×, the
+exact ring 48×, the Hankel table 38× — all more than the memory-bound RHS,
+and the first two more than linear, which is what happens when one
+thread's working set is limited by one NUMA domain's bandwidth and 64
+threads' is not.
 
 ## Running on a device
 
 There is no switch here either. TreeAMR's M6 makes the *storage* decide:
-`backend` is a keyword on `FieldSet` and `GhostSchedule` and on nothing
-else, after which `statevector` allocates where the field set lives,
-`regrid!` reallocates there, and every kernel takes its backend from the
-array it is handed. Every driver therefore takes `backend` alongside its
-`T`, defaulting to `CPU()`:
+`backend` is a keyword on `FieldSet` and on nothing else — since M8 a
+schedule is built from the field set and takes the backend with the rest
+of the layout — after which `statevector` allocates where the field set
+lives, `regrid!` reallocates there, and every kernel takes its backend
+from the array it is handed. Every driver therefore takes `backend`
+alongside its `T`, defaulting to `CPU()`:
 
     track_blast(Float32, Val(2); backend = MetalBackend())
-    wave_errors(Float32, Val(1); N = 16, G = 2, ops = ops, backend = CUDABackend())
+    wave_errors(Float32, Val(1); N = 16, G = 1, ops = ops, backend = CUDABackend())
 
 `T` and `backend` travel together because on a device they are not
 independent: a `Float64` field set on a backend without hardware fp64 is
@@ -726,9 +942,13 @@ first place.
 **The refinement criterion walked cells on the host.** This is the one
 that needed a second implementation, because `flag_blocks` calls
 `f(b, key)` on the host and a realistic criterion reads its block's data.
-`firing_boxes` is the device form: the mesh evaluates a per-cell predicate
-over every block in one kernel and returns each block's firing-cell count
-and bounding box, and the application turns that into flags. See below.
+`firing_boxes` is the device form: the mesh evaluates a per-point predicate
+over every block in one kernel and returns each block's firing count and
+bounding box, and the application turns that into flags. See below. The
+two forms derive a point's *stored* index separately — `fs.G[d]` here,
+inside the kernel there — which is exactly what a stagger could make them
+disagree about, so `test/device_tests.jl` compares them on both
+centerings.
 
 **Three diagnostics were per-block reductions over field data.**
 `field_scales`, [`blast_coverage`](src/blast.jl) and `track_pulse`'s
@@ -787,11 +1007,10 @@ which is the better failure.
 ### The criterion has two forms, and keeps both
 
 [`refine_flags`](src/refinement.jl) dispatches on `get_backend(fs)`: the
-host loop over cells on the CPU, `firing_flags` — built on
+host loop over points on the CPU, `firing_flags` — built on
 `firing_boxes` — on a device. The choice lives there so that no *driver*
-has to make it: a driver passes `backend` to its field set and its
-schedule and then calls `refine_flags`, and nothing in between knows
-which form ran.
+has to make it: a driver passes `backend` to its field set and then calls
+`refine_flags`, and nothing in between knows which form ran.
 
 The host form is kept rather than retired in favour of the one that runs
 everywhere, and not out of caution:
@@ -804,10 +1023,13 @@ everywhere, and not out of caution:
 - it is the readable statement of the criterion; and
 - it is what the device form is **tested against**. Both are available on
   the CPU backend, so `test/device_tests.jl` compares them there, flag
-  for flag and box for box, on pulse data and on blast data and at two
-  caps. Nothing else in the suite would catch a drift: a device run that
-  flagged differently would still run, and would merely build a different
-  mesh.
+  for flag and box for box, on pulse data and on blast data, at two caps,
+  at two precisions and — since M8 — on both centerings. Nothing else in
+  the suite would catch a drift: a device run that flagged differently
+  would still run, and would merely build a different mesh. The centering
+  belongs in that product because the two forms work out a point's stored
+  index independently, and a stagger is what makes those two derivations
+  able to disagree.
 
 The two share their arithmetic — one `cell_tau`, whose argument list is
 not this package's choice but exactly what `firing_boxes` hands a
@@ -833,9 +1055,12 @@ than the host loop.
   four million Bessel evaluations once per run against an evolution of
   thousands of steps, and it is the most favourable shape a *threaded*
   loop can have — which is where it already is.
-- **The viewer.** CairoMakie is host code and reads single cells.
+- **The viewer.** CairoMakie is host code and reads single points.
   `hostcopy` brings a field set down in one call at the top of each
-  `snapshot`, and no line of figure code below it knows the difference.
+  `snapshot`, and no line of figure code below it knows the difference. It
+  has to copy the whole *layout* and not merely the forest — ghost width
+  and centering both, since M8 — or the host array is a different shape
+  from the device one and `copyto!` is the least of the problems.
   That is for a consumer that *cannot* move, not one that has not been
   moved: the numeric diagnostics deliberately do not work this way,
   because a copy of the whole state per chunk is hundreds of megabytes on
@@ -845,66 +1070,151 @@ than the host loop.
 
 Measured on an Apple M3 Pro — 12 CPU cores, 18 GPU cores, unified memory
 — at `Float32`, on the same two-level 2D mesh the thread scaling uses:
-**1792 blocks of 128², 29.4M cells**, a 238 MB working array. The host
-column is the same machine at eight threads, so this is a device against
-a *threaded* host and not against a serial one.
+**1792 blocks of 128², 29.4M cells**, a 242 MB working array
+vertex-centred and 238 MB cell-centred (`N + 2G + 1` stored points per
+dimension against `N + 2G`, at `G = 2` in both columns so that the two
+are a like-for-like comparison). The host column is the same machine at
+eight threads, so this is a device against a *threaded* host and not
+against a serial one.
+
+Vertex-centred:
 
 | phase | CPU, 1 thread | CPU, 8 threads | Metal | Metal vs CPU 8t |
 |---|---|---|---|---|
-| `step` (one RK4 step) | 0.836 | 0.348 | 0.340 | 1.0× |
-| `rhs` | 0.182 | 0.0484 | 0.0539 | **0.9×** |
-| `stage_broadcast` | 0.0154 | 0.0235 | 0.0161 | 1.5× |
-| `initial_data` | 1.546 | 0.344 | 0.0432 | **8.0×** |
-| `blast_exact` | 0.990 | 0.273 | 0.0702 | 3.9× |
-| `refine_flags` | 0.996 | 0.413 | 0.152 | 2.7× |
-| `field_scales` | 0.0675 | 0.0187 | 0.0154 | 1.2× |
-| `blast_coverage` | 0.0676 | 0.0194 | 0.0151 | 1.3× |
-| `blast_reference` | 0.596 | 0.151 | 0.182 | host |
-| `blast_radial_table` | 0.0011 | 0.0025 | 0.0021 | host |
+| `step` (one RK4 step) | 0.889 | 0.244 | 0.363 | 0.7× |
+| `rhs` | 0.188 | 0.0405 | 0.0658 | **0.6×** |
+| `stage_broadcast` | 0.0176 | 0.0171 | 0.0121 | 1.4× |
+| `initial_data` | 1.585 | 0.258 | 0.0492 | **5.2×** |
+| `blast_exact` | 1.000 | 0.176 | 0.0753 | 2.3× |
+| `refine_flags` | 1.015 | 0.264 | 0.148 | 1.8× |
+| `field_scales` | 0.0679 | 0.0116 | 0.0161 | 0.7× |
+| `blast_coverage` | 0.0681 | 0.0119 | 0.0163 | 0.7× |
+| `blast_reference` | 0.620 | 0.0987 | 0.615 | host |
+| `blast_radial_table` | 0.0011 | 0.0008 | 0.0010 | host |
 
-Seconds; the minimum of three, each synchronized. Read it as two
-populations:
+Cell-centred, the same machine in the same sweep:
 
-**The compute-bound callbacks win, by 3–8×.** `initial_data` and
-`blast_exact` do real arithmetic per cell — an `exp` and integer powers,
+| phase | CPU, 1 thread | CPU, 8 threads | Metal |
+|---|---|---|---|
+| `step` | 0.846 | 0.257 | 0.373 |
+| `rhs` | 0.183 | 0.0377 | 0.0651 |
+| `stage_broadcast` | 0.0182 | 0.0167 | 0.0195 |
+| `initial_data` | 1.563 | 0.259 | 0.0447 |
+| `blast_exact` | 1.012 | 0.197 | 0.0758 |
+| `refine_flags` | 1.018 | 0.294 | 0.147 |
+| `field_scales` | 0.0679 | 0.0107 | 0.0163 |
+| `blast_coverage` | 0.0676 | 0.0153 | 0.0154 |
+
+Seconds; the minimum of several, each synchronized.
+
+**The centering costs a few per cent on the RHS and nothing anywhere
+else.** A vertex-like dimension stores one plane more — 133 against 132
+per dimension at `N = 128, G = 2`, 1.5% more bytes — and the one phase
+that is pure bandwidth pays a little more than that: the RHS is 2.6%
+slower vertex-centred at one host thread and 7% slower at eight, on Metal
+1%. The compute-bound phases and the reductions agree between the layouts
+to within the run-to-run spread. This is the honest version of "the
+stagger is free": it is free where the arithmetic dominates, and costs
+about what the extra plane weighs where the memory does. The ratios below
+are quoted from the vertex column and hold for either.
+
+These numbers are lower across the board than the ones recorded here
+before M8, on both layouts and on both backends — the eight-thread host
+column most of all (a `step` of 0.244 against 0.348). That is the machine
+and the Julia version, not the port: the cell-centred column *is* the
+pre-M8 configuration, and it moved by the same amount. Ratios between
+columns of one sweep are the thing to read; absolute seconds across
+sweeps are not.
+
+Read the rest as two populations:
+
+**The compute-bound callbacks win, by 2–5×.** `initial_data` and
+`blast_exact` do real arithmetic per point — an `exp` and integer powers,
 or nine periodic images and two interpolations — and that is what a GPU
-is for. `refine_flags` wins 2.7× *despite* walking every cell twice, so
+is for. `refine_flags` wins 1.8× *despite* walking every point twice, so
 the two-sweep form of the criterion is not what holds it back; what does
 is upstream's deliberate one-work-item-per-block reduction, which
 TreeAMR measures at 5.5× for a single `firing_boxes` and explains as the
 price of determinism.
 
 The three per-block reductions — `field_scales`, `blast_coverage` and
-the norms — are the flat rows for that same reason, 1.2–1.3×. None is on
-the per-evaluation path.
+the norms — are flat or slightly *behind* the threaded host for that same
+reason, 0.7×. None is on the per-evaluation path.
 
 **The bandwidth-bound kernels do not, and cannot on this machine.** The
 RHS is a 3-point stencil per dimension: in 2D six reads and two writes
-per cell, with almost no arithmetic between them. On Apple silicon the
+per point, with almost no arithmetic between them. On Apple silicon the
 CPU and the GPU share one memory controller, so there is no bandwidth
-ratio to win — and measured, there is none: 0.9×. That is not a finding
+ratio to win — and measured, there is none: 0.6×, the device *behind* the
+threaded host. That is not a finding
 about the code. TreeAMR measured **35.5×** on this same RHS on an H200
 against 16 host cores, against a triad bandwidth ratio of 18.7; the
 number here is what the same code does when the ratio is 1. A
 memory-bound kernel moves to a device to get its memory, and on unified
 memory it is already there.
 
-`stage_broadcast` is the one row worth a second look: 8 host threads are
-*slower* than one (0.0235 against 0.0154) because five state-sized
-streams saturate the bus, which is the same ceiling
-[Multi-threading](#multi-threading) measures as 84% of a 64-thread step.
-The device does it in 0.0161 — still not a win, and for the same reason.
+#### The same code on a discrete GPU
+
+The paragraph above says the Metal result is a statement about unified
+memory and not about the code, and quotes TreeAMR's H200 number as the
+evidence. That quotation is now a measurement of *this* package, on
+Symmetry's `h200q`: one NVIDIA H200 against 16 AMD EPYC cores of the same
+node, `Float32`, the identical 29.4M-point mesh.
+
+| phase | CPU, 16 threads | H200 | speedup |
+|---|---|---|---|
+| `step` (one RK4 step) | 0.599 | 0.00807 | 74× |
+| `rhs` | 0.0524 | 0.00147 | **36×** |
+| `stage_broadcast` | 0.0230 | 0.000383 | 60× |
+| `initial_data` | 0.171 | 0.000949 | **180×** |
+| `blast_exact` | 0.290 | 0.00224 | 129× |
+| `refine_flags` | 0.468 | 0.122 | 3.8× |
+| `field_scales` | 0.0293 | 0.0127 | 2.3× |
+| `blast_coverage` | 0.0206 | 0.0128 | 1.6× |
+| `blast_reference` | 0.0296 | 0.218 | host |
+
+Cell-centred on the same node and in the same job: `rhs` 0.0547 against
+0.00148, `initial_data` 0.187 against 0.000950, `refine_flags` 0.454
+against 0.167 — the same conclusion, and the layouts again agree to within
+the run-to-run spread.
+
+**36× on the RHS**, against TreeAMR's 35.5× for the same kernel on the
+same hardware, and against 0.6× on the M3 Pro. Nothing in the application
+differs between those two rows: the same kernel, the same field set, the
+same `--backend=` flag. What differs is whether the device has memory the
+host does not, and a memory-bound kernel is worth moving only when it
+does. Recording both is the point — one machine alone would have supported
+either "GPUs do not help this" or "GPUs give 36×", and neither is the
+finding.
+
+The two rows that do *not* scale are the same two as everywhere else, and
+for the reason already given: `field_scales` and `blast_coverage` are
+upstream's one-work-item-per-block reductions, whose determinism is bought
+with parallelism, and `refine_flags` is built on the same shape. They cost
+3.8× and less here while the per-point kernels cost two orders — which is
+the sharpest version of that trade this package has measured.
+
+`stage_broadcast` is worth a second look on both machines. On the M3 Pro
+8 host threads are barely faster than one (0.0171 against 0.0176),
+because five state-sized streams saturate the bus — the same ceiling
+[Multi-threading](#multi-threading) measures as most of a 64-thread step.
+Metal does it in 0.0121 — barely a win, and for the same reason. The H200
+does it in 0.000383, 60×, because there the bus is a different bus: the
+Amdahl term that caps a threaded step is not intrinsic to the broadcast,
+it is intrinsic to *host* bandwidth.
 
 **And a whole adaptive run is slower, by design of the problem and not of
 the code.** `track_blast` at the calibrated size — 820 blocks of 8², 52k
-cells — takes 5.2 s on eight host threads and 35.8 s on Metal; at
-`roots = 16, N = 16` (400 blocks of 16², 102k cells) the gap narrows to
-0.60 s against 2.10 s. A run that small is launch-bound: an RK4 step is
-four RHS evaluations, each a scatter, several ghost phases and a kernel,
-each synchronized, over blocks of 64 cells. The phase table above is at
-29.4M cells for exactly this reason, and the honest summary is that the
-mesh sizes this package's *tests* use are two orders of magnitude below
-where a device begins to pay.
+points — takes 1.07 s on eight host threads and 6.98 s on Metal; at
+`roots = 16, N = 16, chunk = 0.01` (256 blocks of 16², 66k points) the gap
+narrows to 1.1 s against 3.6 s. A run that small is launch-bound: an RK4
+step is four RHS evaluations, each a scatter, several ghost phases and a
+kernel, each synchronized, over blocks of 64 points. The phase table above
+is at 29.4M points for exactly this reason, and the honest summary is that
+the mesh sizes this package's *tests* use are two orders of magnitude
+below where a device begins to pay. (`chunk` has to shrink with `h` in the
+second run: `refinement_buffer` refuses a margin wider than a block, and
+at `N = 16, roots = 16` the default `chunk = 0.02` would need 22 cells.)
 
 ### Reproducing it
 
@@ -912,8 +1222,10 @@ where a device begins to pay.
 format `--backend=cpu` prints, so the two can be diffed. The device
 package must be in the environment the script is run against, which is
 one command and is in the script's header — the package environment
-deliberately does not have it. Both viewers take `--backend=` too, and
-that is the quickest way to see that a device run is the *same run*:
+deliberately does not have it. `--centering=cell` gives the other column
+of the same table, and the header line names the centering so two files
+can be told apart. Both viewers take `--backend=` and `--centering=` too,
+and that is the quickest way to see that a device run is the *same run*:
 same blocks, same levels, same τ, the same figure.
 
 ## Watching a run: the `observer` keyword
@@ -942,10 +1254,13 @@ already three near-identical time-stepping loops in `src/`; a fourth in
 | `src/supergaussian.jl` | the travelling pulse, its AMR driver, and the uniform reference |
 | `src/blast.jl` | the radial blast wave, its Hankel-quadrature exact solution, its AMR driver, and the uniform reference |
 | `src/benchmark.jl` | per-phase and end-to-end timings, for the thread-scaling measurement |
-| `test/sinewave_tests.jl` | convergence order, the interface-order rule, 3D smoke test, energy drift |
+| `test/sinewave_tests.jl` | convergence order, the interface-order rule, the stagger's two consequences, 3D smoke test, energy drift |
 | `test/refinement_tests.jl` | claims about the indicator itself |
 | `test/supergaussian_tests.jl` | a moving refined region tracks the pulse |
 | `test/blast_tests.jl` | the exact ring, 2nd-order convergence to it, a growing refined region, and what a frozen amplitude scale costs |
+| `test/sinewave_cell_tests.jl` | the three above, cell-centred: the identical assertions with `centering = cellcentered(D)` said out loud, so the numbers measured before vertex became the default stay under test — see Centerings |
+| `test/supergaussian_cell_tests.jl` | " |
+| `test/blast_cell_tests.jl` | " |
 | `test/type_tests.jl` | the drivers at `Float32` and at MultiFloats' `Float32x2` — see Precision |
 | `test/threading_tests.jl` | the answer does not move with the thread count |
 | `test/device_tests.jl` | the two forms of the criterion agree, the geometry follows the storage, and — with a device — a whole run reproduces the host run |
@@ -955,7 +1270,7 @@ already three near-identical time-stepping loops in `src/`; a fourth in
 | `bin/benchmark.jl` | the benchmark's CLI — the one script in `bin/` that uses the *package* environment, since it needs no CairoMakie |
 | `bin/benchmark.sbatch` | the thread and page-placement sweep; a SLURM job and an ordinary shell script at once |
 | `bin/backend.jl` | `--backend=`, shared by all three scripts: loads a device package on demand and runs the work in the world that load created |
-| `.github/workflows/CI.yml` | tests on a Julia matrix, at one thread and at four, plus a job that renders the figures |
+| `.github/workflows/CI.yml` | tests on a Julia matrix, at one thread and at four, plus a job that renders the figures on both layouts |
 
 `bin/visualize.jl` draws four panels per 1D case — the solution, the
 pointwise error in `u`, the indicator τ, and the volume-weighted L2/L∞
@@ -967,7 +1282,11 @@ that it is the *same run* — same blocks, same levels, same τ — rather than
 read that either. Both viewers take it; only the two hardware types are
 offered, because Makie cannot plot a MultiFloat. `--backend=metal` (or
 `cuda`) makes the same argument about the *storage*, and needs
-`--type=f32` on a device without hardware fp64.
+`--type=f32` on a device without hardware fp64. `--centering=cell` makes
+it about the *layout*, and is the one of the three where something does
+visibly move: the samples shift half a spacing, and nothing else does.
+All three flags keep the default spelling's filename, so a comparison
+render never overwrites the figure CI checks.
 
 `bin/visualize2d.jl` is a separate script and not a `--dim=2` flag,
 because nothing transfers: a line per block against `x` is not a worse
@@ -996,8 +1315,10 @@ equation, and belongs upstream where it already lives.
 
 CI runs the test suite on Julia 1.11 and release, on Linux and macOS, and
 separately renders all three figures — plus the pulse at `Float32`, whose
-conversions the default render does not exercise — and keeps them as
-artifacts. One extra entry of the matrix runs the suite on **four
+conversions the default render does not exercise, and all three again
+cell-centred, which is the one comparison where something visibly moves
+and the only check that both viewers' geometry still comes from
+`coordinates` — and keeps them as artifacts. One extra entry of the matrix runs the suite on **four
 threads**: the thread-independence test spawns a subprocess at the *other*
 count either way, so one threaded job and the serial ones between them
 cover both directions, while a whole extra dimension of the matrix would
@@ -1011,7 +1332,8 @@ the tests were already using. Nothing in the test job could have caught that.
 CPU backend, which needs no device package and is the default. That is
 less of a gap than it sounds, because the assertion most worth guarding
 is the one that needs no device: the two forms of the refinement
-criterion must agree, and both are available on the CPU backend. What CI
+criterion must agree, on both centerings, and both forms are available on
+the CPU backend. What CI
 cannot check is that a device run *works* — for that, add a device
 package to an environment of your own and set `TREEWAVE_TEST_BACKEND`;
 see [Running on a device](#running-on-a-device).
@@ -1033,29 +1355,39 @@ Recorded so that a regression is visible as a change in a number rather
 than as a test that merely still passes.
 
 - Sine mode, uniform mesh, order-2 operators: L2 rate 2.0 (D = 1, 2).
-- Sine mode, two-level mesh, order-4 operators and `G = 2`: L2 and L∞
-  rates both 2.0 (D = 1, 2).
-- Sine mode, two-level mesh, D = 1: L2 rate 1.0 at (2,2), below 1.5 at
-  (4,2) and at (2,4), and 2.0 at (4,4) — the interface-order rule.
+- Sine mode, two-level mesh, order-4 operators: L2 and L∞ rates both 2.0
+  (D = 1, 2), at `G = 1` vertex-centred and `G = 2` cell-centred.
+  Vertex-centred L2 rates 1.99 (D = 1) and 1.99 (D = 2); cell-centred the
+  same to two figures.
+- Sine mode, two-level mesh: the interface-order rule, and the two forms
+  it takes. Cell-centred, D = 1: L2 rate 1.0 at (2,2), below 1.5 at (4,2)
+  and at (2,4), and 2.0 at (4,4) — *both* orders matter. Vertex-centred,
+  `G = 1`: 0.99 / 0.99 / 1.99 / 1.99 in D = 1 and 1.01 / 1.01 / 1.99 /
+  1.99 in D = 2 — only the prolongation matters, and the pairs are
+  bit-identical because restriction along a stagger is injection. Also
+  bit-identical: `G = 1` against `G = 2` at order 4 on the vertex layout.
 - Sine mode, four periods on a two-level mesh: L∞ amplitude within 5% of
   its initial value.
-- Pulse, `n = 1`, `σ = 0.08`, `roots = 8`: uniform-coarse (`N = 8`) L∞
-  error 1.433, uniform-fine (`N = 32`) 0.0928. The adaptive run (`N = 8`,
-  two levels) gives 0.0961 — a ratio to the fine reference of 1.035 — at
-  **128** cells against the fine mesh's 256. The pulse peak never leaves a
-  refined block over the whole run.
+- Pulse, `n = 1`, `σ = 0.08`, `roots = 8`, vertex-centred:
+  uniform-coarse (`N = 8`) L∞ error 1.4063, uniform-fine (`N = 32`)
+  0.0930. The adaptive run (`N = 8`, two levels) gives 0.09605 — a ratio
+  to the fine reference of 1.033 — at **128** points against the fine
+  mesh's 256. The pulse peak never leaves a refined block over the whole
+  run. Cell-centred: 1.4330 / 0.09282 / 0.09609, ratio 1.035, the same
+  16 blocks at level 2.
 - Old amplitude criterion vs new Löhner criterion on that same run: 0.0926
   at 176 cells against 0.0961 at 128 cells. The resolution criterion buys a
   27% cell saving for a 4% error increase, and unlike the old one it is not
   told the depth — it discovers level 2 and stops there.
 - Buffer width, same run (derived width is 7 cells for `chunk = 0.02`):
 
-  | buffer | worst L∞ | ratio to uniform-fine | cells |
-  |---|---|---|---|
-  | 7 (derived) | 0.0961 | 1.035 | 128 |
-  | 2 (too narrow) | 0.1071 | 1.154 | 128 |
-  | 0 (none) | 0.1454 | 1.566 | 112 |
+  | buffer | worst L∞, vertex | ratio | worst L∞, cell | ratio |
+  |---|---|---|---|---|
+  | 7 (derived) | 0.09605 | 1.033 | 0.09609 | 1.035 |
+  | 2 (too narrow) | 0.11575 | 1.245 | 0.10708 | 1.154 |
+  | 0 (none) | 0.14307 | 1.538 | 0.14536 | 1.566 |
 
+  128 points in every row but the cell-centred `buffer = 0`, which is 112.
   Wider is monotonically better here, and only the derived width meets the
   test's `rtol = 0.1` against the uniform-fine reference. This **does not**
   reproduce TreeAMR's recorded observation that a margin narrower than the
@@ -1066,54 +1398,83 @@ than as a test that merely still passes.
 - Blast wave, `σ = 0.08`, `roots = 8`, `t_end = 0.4`. Uniform meshes against
   the Hankel-quadrature exact solution:
 
-  | N | h | L2 | L∞ | cells |
-  |---|---|---|---|---|
-  | 8 | 1/64 | 0.0772 | 0.3082 | 4096 |
-  | 16 | 1/128 | 0.0196 | 0.0811 | 16384 |
-  | 32 | 1/256 | 0.0049 | 0.0205 | 65536 |
+  | N | h | L2, vertex | L∞, vertex | L2, cell | L∞, cell | points |
+  |---|---|---|---|---|---|---|
+  | 8 | 1/64 | 0.07717 | 0.30982 | 0.07717 | 0.30819 | 4096 |
+  | 16 | 1/128 | 0.019626 | 0.081591 | 0.019627 | 0.081086 | 16384 |
+  | 32 | 1/256 | 0.0049269 | 0.020605 | 0.0049269 | 0.020540 | 65536 |
 
-  L2 rate 1.99, L∞ rate 1.95 — the quadrature is right to well past what the
-  scheme can see.
-- Blast wave, adaptive (`N = 8`, cap 2) against those: L∞ 0.0297 at 52480
-  cells, so **10× better than uniform-coarse and 1.45× worse than
-  uniform-fine at 80% of its cells**. That is a weaker claim than the
+  Rates 1.98 (L2) and 1.96 / 1.95 (L∞) — the quadrature is right to well
+  past what the scheme can see. (The 1.99 recorded here before was the
+  same 1.985, rounded the other way.)
+- Blast wave, adaptive (`N = 8`, cap 2) against those: L∞ 0.029104
+  vertex-centred at 52480 points, so **10× better than uniform-coarse and
+  1.41× worse than uniform-fine at 80% of its points**; cell-centred
+  0.029713, ratio 1.45. That is a weaker claim than the
   pulse's `rtol = 0.1` match, and it is the honest one: 9% of the ring's
   cells sit on level-1 blocks whose τ fell below `refine_tol`, which is the
   criterion trading accuracy for cells rather than failing to. The pulse
   matched uniform-fine only because its refined region was, relatively, far
   more generous.
 - Blast wave, mesh growth: 136 blocks after the initial adaptation to 820 at
-  `t = 0.4`, a factor of 6.0, with the depth an output — at `σ = 0.08` the
-  indicator's τ falls to 0.222 at level 2, below `refine_tol = 0.30`, so it
-  stops there and `maxlevel_cap` never binds. Max τ on uniform meshes, the
-  calibration that fixes σ:
+  `t = 0.4`, a factor of `6.029411764705882` — **the same digits on both
+  layouts** — with the depth an output: at `σ = 0.08` the indicator's τ
+  falls to 0.23 at level 2, below `refine_tol = 0.30`, so it stops there and
+  `maxlevel_cap` never binds. Max τ on uniform meshes at `t = 0.4`, which is
+  the calibration that fixes σ — the ring at its widest and faintest, not
+  the initial peak:
 
   | σ | h=1/64 | h=1/128 | h=1/256 | h=1/512 |
   |---|---|---|---|---|
-  | 0.05 | 0.909 | 0.745 | 0.424 | 0.157 |
-  | 0.08 | 0.812 | 0.529 | **0.222** | 0.067 |
+  | 0.05, vertex | 0.905 | 0.747 | 0.431 | 0.159 |
+  | 0.05, cell | 0.906 | 0.746 | 0.428 | 0.160 |
+  | 0.08, vertex | 0.818 | 0.544 | **0.227** | 0.069 |
+  | 0.08, cell | 0.820 | 0.540 | **0.229** | 0.069 |
+
+  The two layouts agree to 0.005 everywhere, so the calibration is not one
+  that had to be redone — but it had to be *re*measured to say so, and the
+  recipe is recorded here because the earlier entry did not state it and
+  reproducing it took a second attempt: it is the evolved solution at
+  `t_end`, not the initial data. (On the initial data the same table reads
+  0.65 / 0.32 / 0.11 / 0.03 at σ = 0.08, which is a different question and
+  the wrong one for choosing σ.)
 
   At `σ = 0.05` the indicator wants level 3 and the cap binds instead, which
   is why the blast uses the pulse's σ and not a smaller one. Any
   `refine_tol` in `[0.20, 0.30]` yields the identical mesh.
 - Blast wave with the amplitude scale frozen at `t = 0`: 1024 blocks — the
-  whole domain at level 2 — against 208 for the refreshed run at `t = 0.1`.
-  See the refinement section for why it fails two separate ways.
-- Reduced precision, same runs: the `Float64`/`Float32` table under Precision
-  above. The pulse and the blast wave reach the *same mesh* at both — same
-  block count, same depth, and for the blast the same 91% ring coverage — with
-  L∞ agreeing to under 1%.
+  whole domain at level 2 — against 220 vertex-centred and 208 cell-centred
+  for the refreshed run at `t = 0.1`. See the refinement section for why it
+  fails two separate ways.
+- Reduced precision, same runs: the `Float64`/`Float32` tables under Precision
+  above, one per layout. The pulse and the blast wave reach the *same mesh* at
+  both — same block count, same depth, and for the blast the same 91% ring
+  coverage — with L∞ agreeing to under 1%.
+- Centring, same runs: the two layouts reach the *same mesh* as each
+  other too — the pulse 16 blocks at level 2, the blast 136 → 820 with an
+  identical growth factor to sixteen digits, coverage 0.91052 against
+  0.91097, and L∞ within 2%. They also cost the same to run, except on the
+  bandwidth-bound RHS, where the vertex layout's extra stored plane makes
+  it 2.6% slower at one host thread and 7% at eight. The two columns are
+  side by side in the tables above and in
+  Centerings.
 - Sine mode at 0.9 periods, `N = 16`, `roots = 4`, two levels: final L∞
-  0.0063 with order-4 operators against 0.122 with order-2 — a factor of
-  19 for a change that touches only the ghost cells. This is the pair the
+  0.00641 with order-4 operators against 0.1238 with order-2 — a factor of
+  19 for a change that touches only the ghost points (cell-centred: 0.00632
+  against 0.1225, the same factor). This is the pair the
   viewer draws side by side (`--ops=2`), and the pointwise error goes from
   smooth across the coarse-fine interfaces to visibly kinked at them.
 - Thread scaling on 64 cores (AMD EPYC, 8 NUMA domains; 1792 blocks of
-  `128²`, 29.4M cells): **17.7× on the RHS path, 3.6× on a whole RK4
-  step**, 37–46× on the compute-bound passes. The gap between the first
-  two numbers is the integrator's serial stage arithmetic, and it is 84%
-  of a 64-thread step. The full table, and why interleaving the pages did
-  *not* reproduce TreeAMR's 2–6×, are under
+  `128²`, 29.4M points): **12.7× on the RHS path (16.7× with the pages
+  interleaved), 3.6× on a whole RK4 step**, 38–48× on the compute-bound
+  passes. The gap between the first two numbers is the integrator's serial
+  stage arithmetic, and it is 79% of a 64-thread step. Two entries here
+  changed and are flagged as such: interleaving the pages *does* help, and
+  the claim that it did not came from reading a pair of seconds the wrong
+  way round; and the refinement-flag pass now scales 3.4× where 33.9× was
+  recorded — measured to be equally true of the *pre-M8 code*, run beside
+  this one on the same node in the same job, so it is the machine and not
+  this work. The full table is under
   [Multi-threading](#multi-threading). `bin/benchmark.sbatch` reproduces
   the measurement.
 - The four loops that were this package's own to thread, at 8 threads on
@@ -1141,16 +1502,20 @@ than as a test that merely still passes.
   0.09703, blast 0.029778 against 0.029781), which is the per-block
   summation order inside `volume_weighted_norm` — pairwise on the host,
   sequential in the kernel — and not anything else.
-- Per-phase device against host on that machine, at 29.4M cells: **8.0×
-  on initial data, 3.9× on the exact ring, 2.7× on the refinement
-  criterion, 0.9× on the RHS**. The table and the reason the last number
-  is what it is — one memory controller shared by CPU and GPU, so no
-  bandwidth ratio to win, against TreeAMR's 35× on an H200 whose ratio is
-  19× — are under [Running on a device](#running-on-a-device).
+- Per-phase device against host on that machine, at 29.4M points: **5.2×
+  on initial data, 2.3× on the exact ring, 1.8× on the refinement
+  criterion, 0.6× on the RHS**. And the same code on one **NVIDIA H200**
+  against 16 EPYC cores of the same node: **180× on initial data, 129× on
+  the exact ring, 3.8× on the refinement criterion, 36× on the RHS**. The
+  RHS is the pair worth reading together — the M3 Pro's 0.6× is one
+  memory controller shared by CPU and GPU, so there is no bandwidth ratio
+  to win; the H200's 36× is what the same kernel does when there is, and
+  it matches TreeAMR's own 35.5× for it. Both tables are under
+  [Running on a device](#running-on-a-device).
 - A whole adaptive run on that device is **slower** at the sizes this
-  package's tests use: `track_blast` 5.2 s on eight host threads against
-  35.8 s on Metal at 52k cells, 0.60 s against 2.10 s at 102k. Launch
-  overhead over blocks of 64 cells, and recorded because it is the first
+  package's tests use: `track_blast` 1.07 s on eight host threads against
+  6.98 s on Metal at 52k points, 1.1 s against 3.6 s at 66k. Launch
+  overhead over blocks of 64 points, and recorded because it is the first
   thing anyone will measure.
 
 ## Possible extensions
@@ -1160,7 +1525,14 @@ Not planned, listed because they are the obvious next questions:
 - Kreiss–Oliger dissipation, to see what it does to interface modes.
 - An adaptive integrator, once TreeAMR's `volume_weighted_norm` is wired
   in as `internalnorm`.
-- First-order form, as a second application of the same mesh.
+- First-order form, as a second application of the same mesh — and the
+  one that would reach the half of M8 this package leaves alone. A
+  first-order system has fluxes, so it could carry a face-centred field
+  set at `G = 0` and make the scheme conservative across coarse-fine
+  faces with `InterfaceSchedule` and `restrict_interfaces!`. That is a
+  different application rather than a flag on this one: second-order form
+  has nothing to restrict, and pretending otherwise is what Scope and
+  non-goals refuses.
 - A time integrator whose stage arithmetic is a KernelAbstractions kernel
   like everything else, which is what the Amdahl term under
   [Multi-threading](#multi-threading) actually asks for. The cheap
@@ -1174,4 +1546,13 @@ Not planned, listed because they are the obvious next questions:
 - An adaptive run large enough for a device to pay for itself. The phase
   table shows where that is; what stands in the way is not the code but
   the calibration — `σ / h₀` has to be held fixed and the regrid cadence
-  with it, which is the same constraint `benchmark_driver` documents.
+  with it, which is the same constraint `benchmark_driver` documents. The
+  H200 numbers make this the most interesting of these: a whole run there
+  should be a win rather than the 6× loss Metal measures, and nothing but
+  the mesh size stands between the two.
+- A staggered *system*, rather than one field set that happens to be
+  vertex-centred everywhere. M8's centering is per dimension, so
+  `facecentered` and `edgecentered` layouts exist and are what a
+  constrained-transport scheme needs; the wave equation has no use for
+  them, which is why nothing here exercises them and why saying so is
+  better than inventing a use.

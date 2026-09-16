@@ -88,21 +88,28 @@ integer powers, so unlike the sine mode it runs at a MultiFloats type as
 well; see "Precision" in `CODE.md`.
 
 `backend` is where it is computed, defaulting to the host. Only the field
-set and the schedule are told; the state vector, the regrid and the
-refinement criterion all follow the storage. See "Running on a device" in
-`CODE.md`.
+set is told; the schedule takes the whole layout from it, and the state
+vector, the regrid and the refinement criterion all follow the storage.
+See "Running on a device" in `CODE.md`.
+
+`centering` is where the values sit, defaulting to vertex. The pulse is
+the case where it matters least — a travelling Gaussian is smooth and
+aligned with nothing — which is exactly why it is the useful control:
+whatever the two layouts disagree about on the blast wave, they should
+agree here. See "Centerings" in `CODE.md`.
 """
 function track_pulse(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
                      σ=T(1//20), x0=T(1//4), n=1,
                      ops=Operators(prolongation=4, restriction=4),
                      t_end=T(1//2), chunk=T(1//20), cfl=T(1//4), maxlevel_cap=2,
                      refine_tol=T(3//10), coarsen_tol=T(3//40), ε=T(1//100),
-                     buffer=nothing, backend::Backend=CPU(),
+                     buffer=nothing, centering=vertexcentered(D),
+                     backend::Backend=CPU(),
                      observer=nothing) where {T,D}
-    forest = Forest{T}(ntuple(_ -> roots, D); N=N, G=G,
+    forest = Forest{T}(ntuple(_ -> roots, D); N=N,
                        periodic=ntuple(_ -> true, D),
                        extents=ntuple(_ -> (zero(T), L), D))
-    fs = FieldSet(forest, 2; backend=backend)
+    fs = FieldSet(forest, 2; G=G, centering=centering, backend=backend)
 
     # The wave speed is 1, so the pulse travels exactly `chunk` between one
     # regrid and the next. Deriving the margin from that is the
@@ -164,8 +171,10 @@ function track_pulse(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
 
         observer === nothing || observer(fs, t, sol.u[end])
 
-        # Error against the exact travelling pulse.
-        exact = FieldSet(forest, 2; backend=backend)
+        # Error against the exact travelling pulse, on the run's own
+        # layout: the difference below is between two state vectors, so
+        # the reference has to be sampled where the run is.
+        exact = FieldSet(forest, 2; G=G, centering=centering, backend=backend)
         fill_by_coordinates!(pulse_exact(D, L, x0, σ, t; n=n), exact)
         ue = statevector(exact)
         gather!(ue, exact)
@@ -188,10 +197,11 @@ function track_pulse(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
         # The indicator reads a 3-point stencil, so it needs ghosts; and
         # `regrid!` fills them only afterwards, for the transfer.
         fill_ghosts!(fs, schedule)
-        if regrid!(forest, fs, schedule; flags=flags(fs), buffer=buffer)
-            # For the field set's backend, not the host: the stencils are
-            # read inside the transfer kernel.
-            schedule = GhostSchedule(forest, ops; T=T, backend=backend)
+        if regrid!(forest, fs => schedule; flags=flags(fs), buffer=buffer)
+            # From the field set, not the forest: a schedule belongs to a
+            # layout -- ghost width, centering, element type, backend --
+            # and the stencils are read inside the transfer kernel.
+            schedule = GhostSchedule(fs, ops)
         end
     end
 
@@ -210,12 +220,13 @@ function uniform_pulse(::Type{T}, ::Val{D}; roots, N, G=2, L=one(T),
                        σ=T(2//25), x0=T(1//4), n=1,
                        ops=Operators(prolongation=4, restriction=4),
                        t_end=T(1//2), cfl=T(1//4),
+                       centering=vertexcentered(D),
                        backend::Backend=CPU()) where {T,D}
-    forest = Forest{T}(ntuple(_ -> roots, D); N=N, G=G,
+    forest = Forest{T}(ntuple(_ -> roots, D); N=N,
                        periodic=ntuple(_ -> true, D),
                        extents=ntuple(_ -> (zero(T), L), D))
-    fs = FieldSet(forest, 2; backend=backend)
-    schedule = GhostSchedule(forest, ops; T=T, backend=backend)
+    fs = FieldSet(forest, 2; G=G, centering=centering, backend=backend)
+    schedule = GhostSchedule(fs, ops)
     fill_by_coordinates!(pulse_exact(D, L, x0, σ, zero(T); n=n), fs)
     u = statevector(fs)
     gather!(u, fs)
@@ -223,10 +234,13 @@ function uniform_pulse(::Type{T}, ::Val{D}; roots, N, G=2, L=one(T),
     nsteps = ceilint(t_end / dt)
     sol = solve(ODEProblem(wave_rhs!, u, (zero(T), t_end), WaveProblem(fs, schedule)),
                 RK4(); dt=t_end / nsteps, adaptive=false, save_everystep=false)
-    exact = FieldSet(forest, 2; backend=backend)
+    exact = FieldSet(forest, 2; G=G, centering=centering, backend=backend)
     fill_by_coordinates!(pulse_exact(D, L, x0, σ, t_end; n=n), exact)
     ue = statevector(exact)
     gather!(ue, exact)
+    # `cells` counts owned points, which is `N^D` per block whatever the
+    # centering -- a vertex-centred block stores a shared boundary plane
+    # too, but it does not own it.
     return (err=volume_weighted_norm(fs, sol.u[end] .- ue; p=Inf),
             cells=nleaves(forest) * N^D)
 end

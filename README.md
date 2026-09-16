@@ -18,10 +18,20 @@ case can be run in single precision on a device with no hardware fp64, or
 in a MultiFloats software type. See "Precision" in [CODE.md](CODE.md) for
 what that does and does not buy.
 
+The values sit on **cell boundaries**: every driver takes a `centering`
+keyword defaulting to `vertexcentered(D)`, which is the natural layout for
+a wave equation and the one where restriction across a coarse-fine
+interface is exact injection — so only the prolongation order enters the
+global convergence rate, and one ghost plane suffices at order 4 where
+cell centring needs two. `cellcentered(D)` runs the same studies for
+comparison, and does so in CI. "Centerings" in [CODE.md](CODE.md) has what
+changes and what, measurably, does not.
+
 ```bash
 julia --project=. -e 'using Pkg; Pkg.test()'   # the acceptance tests
 julia --project=bin bin/visualize.jl           # solution, error, error norms
 julia --project=bin bin/visualize.jl --type=f32   # the same run, single precision
+julia --project=bin bin/visualize.jl --centering=cell   # and the other layout
 julia --project=bin bin/visualize2d.jl         # the blast wave and its mesh
 julia -t auto --project=. bin/benchmark.jl     # where the time goes
 ```
@@ -36,8 +46,10 @@ It also runs on a GPU with nothing to configure but where the storage
 goes: every driver takes a KernelAbstractions `backend` alongside its
 type, and both viewers and the benchmark take `--backend=cuda|metal`. No
 device package is a dependency of this one. What that buys is the
-compute-bound work — 8× on initial data on an M3 Pro — and, on unified
-memory, nothing at all on the memory-bound right-hand side; "Running on a
-device" in [CODE.md](CODE.md) has the table and the reason.
+compute-bound work — 5× on initial data on an M3 Pro, 180× on an H200 —
+and, on unified memory, nothing at all on the memory-bound right-hand
+side. On an H200, where there *is* bandwidth to win, that same right-hand
+side gets 36×. "Running on a device" in [CODE.md](CODE.md) has both
+tables and the reason they differ.
 
 See [CODE.md](CODE.md) for the design and the measured results.

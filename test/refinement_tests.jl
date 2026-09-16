@@ -5,15 +5,25 @@
 # claim that the criterion actually steers a moving mesh is in
 # `supergaussian_tests.jl`, where it is measured against a uniform mesh of
 # the same finest spacing.
+#
+# They run vertex-centred, like everything else, and are not duplicated
+# for cell centring. The indicator is arithmetic on stored values: it
+# reads a block's `N` owned points and one neighbour either side, which
+# is the same walk for either layout, and the one thing the centring
+# changes -- the stored index an owned point maps to -- is what
+# `test/device_tests.jl` compares the host and device forms on, for both
+# layouts. The end-to-end cell-centred claims are in the `*_cell_tests`
+# files.
 
 const REFOPS = Operators(prolongation=4, restriction=4)
 
 """A uniform periodic 1D forest with the pulse in it, ghosts filled."""
-function pulse_field(N; roots=8, L=1.0, σ=0.08, x0=0.25, G=2)
-    forest = Forest((roots,); N=N, G=G, periodic=(true,), extents=((0.0, L),))
-    fs = FieldSet(forest, 2)
+function pulse_field(N; roots=8, L=1.0, σ=0.08, x0=0.25, G=1,
+                     centering=vertexcentered(1))
+    forest = Forest((roots,); N=N, periodic=(true,), extents=((0.0, L),))
+    fs = FieldSet(forest, 2; G=G, centering=centering)
     fill_by_coordinates!(pulse_exact(1, L, x0, σ, 0.0), fs)
-    fill_ghosts!(fs, GhostSchedule(forest, REFOPS))
+    fill_ghosts!(fs, GhostSchedule(fs, REFOPS))
     return forest, fs
 end
 
@@ -75,12 +85,12 @@ end
     # smooth -- for the travelling pulse ∂ₜu carries an order of magnitude
     # more amplitude than u. Reading variable 1 alone, as the criterion
     # this replaced did, misses it entirely.
-    forest = Forest((4,); N=64, G=2, periodic=(true,), extents=((0.0, 1.0),))
-    fs = FieldSet(forest, 2)
+    forest = Forest((4,); N=64, periodic=(true,), extents=((0.0, 1.0),))
+    fs = FieldSet(forest, 2; G=1, centering=vertexcentered(1))
     # Variable 1: one wave over the domain, richly resolved. Variable 2:
     # twelve waves, at barely two cells each.
     fill_by_coordinates!((x, v) -> sinpi(2 * (v == 1 ? 1 : 12) * x[1]), fs)
-    fill_ghosts!(fs, GhostSchedule(forest, REFOPS))
+    fill_ghosts!(fs, GhostSchedule(fs, REFOPS))
 
     both = maximum(b -> cell_indicator(fs, b, Inf;
                                        scales=field_scales(fs))[1], 1:nblocks(fs))
@@ -100,8 +110,8 @@ end
     # cap set far above what the data needs, the indicator alone must be
     # what stops the cascade -- otherwise `maxlevel_cap` is just the old
     # hardcoded target wearing a different name.
-    forest = Forest((8,); N=8, G=2, periodic=(true,), extents=((0.0, 1.0),))
-    fs = FieldSet(forest, 2)
+    forest = Forest((8,); N=8, periodic=(true,), extents=((0.0, 1.0),))
+    fs = FieldSet(forest, 2; G=1, centering=vertexcentered(1))
     initial = pulse_exact(1, 1.0, 0.25, 0.08, 0.0)
     fill_by_coordinates!(initial, fs)
     scales = field_scales(fs)
@@ -118,8 +128,8 @@ end
     # The direct test of the hysteresis dead band. With one threshold
     # instead of two, blocks sitting at the boundary refine and coarsen on
     # alternate regrids and this never settles.
-    forest = Forest((8,); N=8, G=2, periodic=(true,), extents=((0.0, 1.0),))
-    fs = FieldSet(forest, 2)
+    forest = Forest((8,); N=8, periodic=(true,), extents=((0.0, 1.0),))
+    fs = FieldSet(forest, 2; G=1, centering=vertexcentered(1))
     initial = pulse_exact(1, 1.0, 0.25, 0.08, 0.0)
     fill_by_coordinates!(initial, fs)
     scales = field_scales(fs)
@@ -140,8 +150,8 @@ end
     # still holds the feature, and must still report a box, or the margin
     # that travels with the feature would not exist. Keying the buffer on
     # Refine alone cannot express this.
-    forest = Forest((8,); N=8, G=2, periodic=(true,), extents=((0.0, 1.0),))
-    fs = FieldSet(forest, 2)
+    forest = Forest((8,); N=8, periodic=(true,), extents=((0.0, 1.0),))
+    fs = FieldSet(forest, 2; G=1, centering=vertexcentered(1))
     initial = pulse_exact(1, 1.0, 0.25, 0.08, 0.0)
     fill_by_coordinates!(initial, fs)
     scales = field_scales(fs)
@@ -167,7 +177,7 @@ end
 @testset "The buffer width covers the feature's motion" begin
     # TreeAMR's measured guidance is that the margin must exceed the travel
     # per regrid interval, so the derivation rounds up and adds a cell.
-    forest = Forest((8,); N=8, G=2, periodic=(true,), extents=((0.0, 1.0),))
+    forest = Forest((8,); N=8, periodic=(true,), extents=((0.0, 1.0),))
     for chunk in (0.005, 0.01, 0.02)
         cells = refinement_buffer(forest, 2, chunk)
         @test cells > chunk / spacing(forest, 2)

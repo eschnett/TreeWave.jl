@@ -338,6 +338,13 @@ case where that asks the most: the quadrature stays a host `Float64`
 table, and its two radial profiles are converted and uploaded once per
 error measurement by [`blast_exact`](@ref). See "Running on a device" in
 `CODE.md`.
+
+`centering` is where the values sit, defaulting to vertex. This is the
+case where the choice is visible: the peak sits at the centre of the box,
+which is a grid *point* on a vertex mesh and a block corner on a
+cell-centred one, so the two layouts sample the sharpest part of the
+initial data differently and the indicator sees different curvature
+there. The measured consequence is in `CODE.md`.
 """
 function track_blast(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
                      σ=T(2//25), n=1, x₀=nothing,
@@ -345,11 +352,12 @@ function track_blast(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
                      t_end=T(2//5), chunk=T(1//50), cfl=T(1//4), maxlevel_cap=2,
                      refine_tol=T(3//10), coarsen_tol=T(3//40), ε=T(1//100),
                      buffer=nothing, refresh_scales=true,
+                     centering=vertexcentered(D),
                      backend::Backend=CPU(), observer=nothing) where {T,D}
-    forest = Forest{T}(ntuple(_ -> roots, D); N=N, G=G,
+    forest = Forest{T}(ntuple(_ -> roots, D); N=N,
                        periodic=ntuple(_ -> true, D),
                        extents=ntuple(_ -> (zero(T), L), D))
-    fs = FieldSet(forest, 2; backend=backend)
+    fs = FieldSet(forest, 2; G=G, centering=centering, backend=backend)
     x₀ = x₀ === nothing ? ntuple(_ -> L / 2, D) : x₀
     check_blast_order(n)
 
@@ -407,7 +415,7 @@ function track_blast(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
         # Error against the exact ring, at every chunk rather than only at
         # the end: the mesh is rebuilt twenty times over the run and the
         # question is whether any one of those rebuilds hurt.
-        exact = FieldSet(forest, 2; backend=backend)
+        exact = FieldSet(forest, 2; G=G, centering=centering, backend=backend)
         fill_by_coordinates!(blast_exact(T, reference, t; backend=backend),
                              exact)
         ue = statevector(exact)
@@ -431,10 +439,11 @@ function track_blast(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
         # and `nblocks` below is meant to describe the mesh `worst` was
         # measured against.
         c < nchunks || break
-        if regrid!(forest, fs, schedule; flags=flags(fs), buffer=buffer)
-            # For the field set's backend, not the host: the stencils are
-            # read inside the transfer kernel.
-            schedule = GhostSchedule(forest, ops; T=T, backend=backend)
+        if regrid!(forest, fs => schedule; flags=flags(fs), buffer=buffer)
+            # From the field set, not the forest: a schedule belongs to a
+            # layout -- ghost width, centering, element type, backend --
+            # and the stencils are read inside the transfer kernel.
+            schedule = GhostSchedule(fs, ops)
         end
     end
 
@@ -460,11 +469,12 @@ function uniform_blast(::Type{T}, ::Val{2}; roots, N, G=2, L=one(T),
                        σ=T(2//25), n=1, x₀=nothing,
                        ops=Operators(prolongation=4, restriction=4),
                        t_end=T(2//5), cfl=T(1//4),
+                       centering=vertexcentered(2),
                        backend::Backend=CPU()) where {T}
-    forest = Forest{T}((roots, roots); N=N, G=G, periodic=(true, true),
+    forest = Forest{T}((roots, roots); N=N, periodic=(true, true),
                        extents=ntuple(_ -> (zero(T), L), 2))
-    fs = FieldSet(forest, 2; backend=backend)
-    schedule = GhostSchedule(forest, ops; T=T, backend=backend)
+    fs = FieldSet(forest, 2; G=G, centering=centering, backend=backend)
+    schedule = GhostSchedule(fs, ops)
     x₀ = x₀ === nothing ? (L / 2, L / 2) : x₀
     check_blast_order(n)
     fill_by_coordinates!(blast_initial(2, L, x₀, σ; n=n), fs)
@@ -475,7 +485,7 @@ function uniform_blast(::Type{T}, ::Val{2}; roots, N, G=2, L=one(T),
     sol = solve(ODEProblem(wave_rhs!, u, (zero(T), t_end),
                            WaveProblem(fs, schedule)), RK4();
                 dt=t_end / nsteps, adaptive=false, save_everystep=false)
-    exact = FieldSet(forest, 2; backend=backend)
+    exact = FieldSet(forest, 2; G=G, centering=centering, backend=backend)
     fill_by_coordinates!(blast_exact(T, L, x₀, σ, t_end; backend=backend),
                          exact)
     ue = statevector(exact)

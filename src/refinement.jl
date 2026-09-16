@@ -151,12 +151,17 @@ end
 """
     cell_indicator(fs, b, box_tol; scales, vars=1:fs.nvars, ε=T(1//100))
 
-The worst [`lohner`](@ref) indicator over every interior cell, dimension,
-and variable of block `b`, together with the bounding box of the cells
+The worst [`lohner`](@ref) indicator over every owned point, dimension,
+and variable of block `b`, together with the bounding box of the points
 that exceeded `box_tol`. Returns `(τmax, box)`, with `box` an
-`NTuple{D,UnitRange{Int}}` in the block's own **interior** indices `1:N`
-as TreeAMR's flag boxes are specified, or `nothing` if no cell exceeded
+`NTuple{D,UnitRange{Int}}` in the block's own **owned** indices `1:N`
+as TreeAMR's flag boxes are specified, or `nothing` if no point exceeded
 `box_tol`.
+
+A block owns `N` points per dimension whatever its centering, so this
+walk and the box it reports are the same for a cell-centred and a
+vertex-centred field set; only the stored index a walked point maps to
+differs, and `fs.G` carries that.
 
 Taking the maximum over variables matters for a system: for the
 travelling pulse `∂ₜu` has an order of magnitude more amplitude than `u`,
@@ -169,8 +174,11 @@ arithmetic is [`cell_tau`](@ref), shared with the device form; see
 [`firing_flags`](@ref).
 
 !!! warning "Ghosts must be filled first"
-    The stencil reaches one cell beyond the interior at each face, so the
-    caller must `fill_ghosts!` before flagging. `regrid!` fills ghosts
+    The stencil reaches one point beyond the owned range at each face —
+    a ghost on the low side, and on the high side a ghost or, in a
+    vertex-like dimension, the shared boundary plane, which the exchange
+    fills exactly as it fills a ghost. So the caller must `fill_ghosts!`
+    before flagging. `regrid!` fills ghosts
     only *after* flags are computed — for the transfer's prolongation —
     so it cannot do this for you, and stale ghosts here corrupt the
     verdict silently rather than raising anything.
@@ -178,10 +186,10 @@ arithmetic is [`cell_tau`](@ref), shared with the device form; see
 function cell_indicator(fs::FieldSet{T,D}, b::Integer, box_tol;
                         scales, vars=1:fs.nvars, ε=T(1//100)) where {T,D}
     forest = fs.forest
-    N, G = forest.N, forest.G
-    G >= 1 || throw(ArgumentError(
-        "the Löhner stencil reads one cell beyond the interior, so G >= 1 is " *
-        "required; got G = $G"))
+    N, G = forest.N, fs.G
+    all(>=(1), G) || throw(ArgumentError(
+        "the Löhner stencil reads one point beyond the owned range in every " *
+        "dimension, so G >= 1 is required in each; got G = $G"))
     length(scales) == length(vars) || throw(DimensionMismatch(
         "got $(length(scales)) scales for $(length(vars)) variables"))
 
@@ -195,12 +203,13 @@ function cell_indicator(fs::FieldSet{T,D}, b::Integer, box_tol;
     lo = ntuple(_ -> N, Val(D))
     hi = ntuple(_ -> 1, Val(D))
 
-    # Over interior indices `1:N`, with the stored index derived -- the
+    # Over owned indices `1:N`, with the stored index derived -- the
     # same walk TreeAMR's firing kernel makes, so the two forms of the
-    # criterion can be read against each other.
+    # criterion can be read against each other. `N` is the owned count
+    # for every centering, which is why neither form takes one.
     for c in CartesianIndices(ntuple(_ -> N, Val(D)))
         i = ntuple(d -> Tuple(c)[d], Val(D))
-        idx = ntuple(d -> i[d] + G, Val(D))
+        idx = ntuple(d -> i[d] + G[d], Val(D))
         τ = cell_tau(fs.work, idx, b, vt, st, ε)
         τmax = max(τmax, τ)
         τ > box_tol || continue

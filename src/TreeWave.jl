@@ -22,10 +22,14 @@ amplitude as it spreads, so the refinement criterion's fixed noise floor
 is put under real strain) in `blast.jl`. The refinement criterion that
 drives the adaptive runs is in `refinement.jl`.
 
-Every driver takes the floating-point type it computes in and the
-KernelAbstractions backend it runs on as its first two things to decide,
-so the same study runs at `Float32` on a GPU as at `Float64` on the host;
-see "Precision" and "Running on a device" in `CODE.md`.
+Every driver takes the floating-point type it computes in, the
+KernelAbstractions backend it runs on, and the centering its values sit
+at, so the same study runs at `Float32` on a GPU as at `Float64` on the
+host, and vertex-centred as cell-centred. The default is vertex — the
+natural layout for a wave equation, and the one where restriction across
+a coarse-fine interface is exact injection — with the cell-centred study
+kept beside it as the comparison. See "Precision", "Running on a device"
+and "Centerings" in `CODE.md`.
 
 See `CODE.md` in the package root for the design document, and `bin/` for
 a CairoMakie viewer.

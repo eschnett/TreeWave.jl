@@ -13,6 +13,12 @@ using SpecialFunctions: besselj0
     include("sinewave_tests.jl")
     include("supergaussian_tests.jl")
     include("blast_tests.jl")
+    # The same three studies cell-centred, so that the numbers measured
+    # before vertex centring became the default stay under test rather
+    # than becoming a paragraph in `CODE.md`. See "Centerings" there.
+    include("sinewave_cell_tests.jl")
+    include("supergaussian_cell_tests.jl")
+    include("blast_cell_tests.jl")
     include("type_tests.jl")
     include("device_tests.jl")
 end

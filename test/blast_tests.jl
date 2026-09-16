@@ -1,7 +1,13 @@
-# The radial blast wave: a feature that *loses amplitude* as it spreads
-# and whose refined region *grows*. Neither of the other two initial
-# conditions does either, and the second of those two properties is what
-# puts the refinement criterion's noise floor under real strain.
+# The radial blast wave, **vertex-centred**: a feature that *loses
+# amplitude* as it spreads and whose refined region *grows*. Neither of
+# the other two initial conditions does either, and the second of those
+# two properties is what puts the refinement criterion's noise floor
+# under real strain.
+#
+# It is also the case where the centring is most visible -- the peak sits
+# on a grid point here and on a block corner under cell centring -- so
+# the cell-centred run of the identical study is kept in
+# `blast_cell_tests.jl` rather than being described.
 #
 # The claims about the indicator itself are in `refinement_tests.jl`.
 
@@ -39,7 +45,7 @@ end
 @testset "A uniform mesh converges at 2nd order to the exact ring" begin
     # The ring is not an artifact of the quadrature: if `blast_exact` were
     # wrong by anything that does not itself scale like h², the measured
-    # rate would not be 2. Measured 1.99 (L2) and 1.95 (L∞); see CODE.md.
+    # rate would not be 2. Measured 1.98 (L2) and 1.96 (L∞); see CODE.md.
     hs = [r.h for r in blast_uniform]
     @test convergence_rate(hs, [r.l2 for r in blast_uniform]) > 1.7
     @test convergence_rate(hs, [r.err for r in blast_uniform]) > 1.7
@@ -61,19 +67,20 @@ end
     @test amr.worst < coarse.err / 5
 
     # The refined region grows with the ring rather than staying put, as
-    # it does for the travelling pulse. Measured 136 -> 820 blocks.
+    # it does for the travelling pulse. Measured 136 -> 820 blocks,
+    # the same mesh the cell-centred run reaches.
     @test amr.growth > 3
 
     # Most of the ring rides on the finest level. Not *all* of it: where τ
     # has fallen below refine_tol the criterion has judged the block
     # adequately resolved and left it coarse, which is the criterion
-    # working rather than failing. Measured 0.911.
+    # working rather than failing. Measured 0.9105.
     @test amr.covered > 0.85
 
     # The cost of that judgement, and the reason this does NOT assert the
     # pulse test's `rtol = 0.1` match against the fine mesh: the adaptive
     # run is measurably worse than uniform-fine, at four fifths of its
-    # cells. Measured ratio 1.45.
+    # cells. Measured ratio 1.41.
     @test amr.worst < 1.6 * fine.err
     @test amr.nblocks * 8^2 < fine.cells
 end
@@ -94,5 +101,5 @@ end
     # is at the finest level because everything was refined -- which is
     # why block count and not coverage is the measure here.
     @test frozen.nblocks == 1024
-    @test tracked.nblocks < frozen.nblocks / 3
+    @test tracked.nblocks < frozen.nblocks / 3   # measured 220 against 1024
 end

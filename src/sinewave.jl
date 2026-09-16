@@ -57,10 +57,16 @@ same box is left uniform, as a control.
 The leading `T` is the floating-point type the whole run is computed in; it
 reaches the field set, the schedule and the state vector by way of the
 forest, which is the only place it has to be said. It defaults to `Float64`.
+
+It takes neither a ghost width nor a centering, and that is the point: it
+cuts space into blocks, and neither how far a stencil reaches into a
+neighbour nor where within a cell a value sits changes how space is cut.
+Both belong to the field set — see `FieldSet` and "Centerings" in
+`CODE.md`.
 """
-function wave_forest(::Type{T}, ::Val{D}, N, G; roots=4, L=one(T),
+function wave_forest(::Type{T}, ::Val{D}, N; roots=4, L=one(T),
                      refined=true) where {T,D}
-    forest = Forest{T}(ntuple(_ -> roots, D); N=N, G=G,
+    forest = Forest{T}(ntuple(_ -> roots, D); N=N,
                        periodic=ntuple(_ -> true, D),
                        extents=ntuple(_ -> (zero(T), L), D))
     refined || return forest
@@ -73,7 +79,7 @@ function wave_forest(::Type{T}, ::Val{D}, N, G; roots=4, L=one(T),
     return forest
 end
 
-wave_forest(valD::Val, N, G; kwargs...) = wave_forest(Float64, valD, N, G; kwargs...)
+wave_forest(valD::Val, N; kwargs...) = wave_forest(Float64, valD, N; kwargs...)
 
 """
 Evolve the sine mode to `t_end` with fixed-step RK4 and return the
@@ -90,18 +96,25 @@ solution is stored.
 available at a MultiFloats type; see "Precision" in `CODE.md`.
 
 `backend` is where it is computed, defaulting to the host. It is said
-twice — to the field set and to the schedule — and everything else
-follows the storage; see "Running on a device" in `CODE.md`.
+once, to the field set, and the schedule takes it from there along with
+the rest of the layout; see "Running on a device" in `CODE.md`.
+
+`centering` is where the values sit, defaulting to vertex — the natural
+layout for a wave equation, and the one that makes the interface-order
+rule cheaper: restriction along a stagger is exact injection, so only the
+prolongation order enters the global rate and `G = 1` suffices at order
+4. `cellcentered(D)` is the comparison and needs `G = 2` there. See
+"Centerings" in `CODE.md`.
 """
 function wave_errors(::Type{T}, ::Val{D}; N, G=1,
                      ops=Operators(prolongation=2, restriction=2),
                      roots=4, L=one(T), m=1,
                      cfl=T(1//4), periods=T(1//4), alg=RK4(), refined=true,
-                     backend::Backend=CPU(),
+                     centering=vertexcentered(D), backend::Backend=CPU(),
                      observer=nothing, nsnapshots=64) where {T,D}
-    forest = wave_forest(T, Val(D), N, G; roots=roots, L=L, refined=refined)
-    fs = FieldSet(forest, 2; backend=backend)
-    problem = WaveProblem(fs, GhostSchedule(forest, ops; T=T, backend=backend))
+    forest = wave_forest(T, Val(D), N; roots=roots, L=L, refined=refined)
+    fs = FieldSet(forest, 2; G=G, centering=centering, backend=backend)
+    problem = WaveProblem(fs, GhostSchedule(fs, ops))
 
     fill_by_coordinates!(wave_exact(D, L, m, zero(T)), fs)
     u0 = statevector(fs)
@@ -134,7 +147,11 @@ function wave_errors(::Type{T}, ::Val{D}; N, G=1,
         end
     end
 
-    exact = FieldSet(forest, 2; backend=backend)
+    # The same layout as `fs`, not merely the same forest: the error below
+    # is a difference of two state vectors, and a field set built at a
+    # different ghost width or centering would be sampling the exact
+    # solution somewhere else.
+    exact = FieldSet(forest, 2; G=G, centering=centering, backend=backend)
     fill_by_coordinates!(wave_exact(D, L, m, t_end), exact)
     uexact = statevector(exact)
     gather!(uexact, exact)

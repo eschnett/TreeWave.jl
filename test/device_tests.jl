@@ -61,29 +61,38 @@ end
 const DEVICE = length(BACKENDS) > 1 ? BACKENDS[2] : nothing
 const DEVOPS = Operators(prolongation=4, restriction=4)
 
+# The ghost width order-4 operators need, which is the one thing about
+# these field sets the centering changes: `p/2 - 1` along a stagger,
+# `p/2` across one.
+devghosts(centering) = all(==(:vertex), centering) ? 1 : 2
+
 """A 1D pulse on an eight-block mesh, with the far half refined."""
-function pulsefieldset(::Type{T}; backend=CPU()) where {T}
-    forest = Forest{T}((8,); N=8, G=2, periodic=(true,),
+function pulsefieldset(::Type{T}; backend=CPU(),
+                       centering=vertexcentered(1)) where {T}
+    forest = Forest{T}((8,); N=8, periodic=(true,),
                        extents=((zero(T), one(T)),))
     # Refined blocks far from the pulse, so the criterion has somewhere to
     # say `Coarsen`: a quiet block at level 0 must stay a bare `Keep`, and
     # a quiet block above it must ask to go away.
     refine!(forest, forest.leaves[6:7])
     balance!(forest)
-    fs = FieldSet(forest, 2; backend=backend)
+    fs = FieldSet(forest, 2; G=devghosts(centering), centering=centering,
+                  backend=backend)
     fill_by_coordinates!(pulse_exact(1, one(T), T(1//4), T(2//25), zero(T)), fs)
-    fill_ghosts!(fs, GhostSchedule(forest, DEVOPS; T=T, backend=backend))
+    fill_ghosts!(fs, GhostSchedule(fs, DEVOPS))
     return fs
 end
 
 """The blast wave's initial data in 2D, whose `∂ₜu` is exactly zero."""
-function blastfieldset(::Type{T}; backend=CPU()) where {T}
-    forest = Forest{T}((4, 4); N=8, G=2, periodic=(true, true),
+function blastfieldset(::Type{T}; backend=CPU(),
+                       centering=vertexcentered(2)) where {T}
+    forest = Forest{T}((4, 4); N=8, periodic=(true, true),
                        extents=ntuple(_ -> (zero(T), one(T)), 2))
-    fs = FieldSet(forest, 2; backend=backend)
+    fs = FieldSet(forest, 2; G=devghosts(centering), centering=centering,
+                  backend=backend)
     x₀ = (one(T) / 2, one(T) / 2)
     fill_by_coordinates!(blast_initial(2, one(T), x₀, T(2//25)), fs)
-    fill_ghosts!(fs, GhostSchedule(forest, DEVOPS; T=T, backend=backend))
+    fill_ghosts!(fs, GhostSchedule(fs, DEVOPS))
     return fs
 end
 
@@ -94,8 +103,16 @@ end
     # backend, where both forms are available -- on a device
     # `refine_flags` *is* `firing_flags` and there would be nothing to
     # compare it against.
+    #
+    # Both centerings, because the two forms derive the stored index of an
+    # owned point separately -- `cell_indicator` here, TreeAMR's firing
+    # kernel there -- and a stagger is exactly what makes those two
+    # derivations able to disagree. Nothing else in the suite would catch
+    # it: a run that flagged differently would still run.
     for T in (Float64, Float32)
-        for fs in (pulsefieldset(T), blastfieldset(T))
+        for fs in (pulsefieldset(T), blastfieldset(T),
+                   pulsefieldset(T; centering=cellcentered(1)),
+                   blastfieldset(T; centering=cellcentered(2)))
             scales = field_scales(fs)
             # Two caps: at 2 the firing blocks ask to refine, at 0 they are
             # already at the cap and must ask for the equal-level margin
@@ -133,8 +150,7 @@ for (name, backend, types) in BACKENDS
         # be a crash inside the kernel rather than anything nameable.
         for T in types
             fs = pulsefieldset(T; backend=backend)
-            problem = WaveProblem(fs, GhostSchedule(fs.forest, DEVOPS; T=T,
-                                                    backend=backend))
+            problem = WaveProblem(fs, GhostSchedule(fs, DEVOPS))
             @test typeof(get_backend(problem.spacings)) === typeof(backend)
             @test eltype(problem.spacings) === T
 
@@ -145,6 +161,8 @@ for (name, backend, types) in BACKENDS
             @test host.work isa Array
             @test host.forest === fs.forest
             @test host.work == Array(fs.work)
+            @test host.G == fs.G                     # the whole layout, not
+            @test host.centering == fs.centering     # merely the forest
             backend isa CPU && @test host === fs     # nothing to copy
         end
     end
@@ -161,7 +179,7 @@ if DEVICE !== nothing
         # `volume_weighted_norm` are pairwise on the host and sequential
         # in the kernel, so they differ in their last bits and the
         # difference grows with the number of steps.
-        kw = (; N=8, G=2, ops=DEVOPS)
+        kw = (; N=8, G=1, ops=DEVOPS)
         s0 = wave_errors(T, Val(1); kw...)
         s1 = wave_errors(T, Val(1); kw..., backend=devbackend)
         @test s1.nblocks == s0.nblocks
@@ -169,7 +187,7 @@ if DEVICE !== nothing
         @test s1.l2 isa T
         @test s1.l2 ≈ s0.l2 rtol = 1e-3
 
-        pkw = (; roots=8, N=8, G=2, ops=DEVOPS, σ=T(2//25), chunk=T(1//50))
+        pkw = (; roots=8, N=8, G=1, ops=DEVOPS, σ=T(2//25), chunk=T(1//50))
         p0 = track_pulse(T, Val(1); pkw...)
         p1 = track_pulse(T, Val(1); pkw..., backend=devbackend)
         @test p1.nblocks == p0.nblocks
@@ -177,13 +195,38 @@ if DEVICE !== nothing
         @test p1.tracking == p0.tracking
         @test p1.worst ≈ p0.worst rtol = 1e-2
 
+        # The solution itself, per chunk, which is the tight comparison and
+        # the one worth making: no cancellation, so this measures the
+        # divergence between the two arithmetics directly. Measured 7e-6
+        # at Float32 on both centerings.
+        norms(backend) = begin
+            ns = T[]
+            track_blast(T, Val(2); t_end=T(1//10), backend=backend,
+                        observer=(fs, t, u) ->
+                            push!(ns, volume_weighted_norm(fs, u; p=Inf)))
+            ns
+        end
+        n0, n1 = norms(CPU()), norms(devbackend)
+        @test length(n1) == length(n0)
+        @test all(isapprox(a, b; rtol=1e-4) for (a, b) in zip(n0, n1))
+
         b0 = track_blast(T, Val(2); t_end=T(1//10))
         b1 = track_blast(T, Val(2); t_end=T(1//10), backend=devbackend)
         @test b1.nblocks == b0.nblocks
         @test b1.maxlevel == b0.maxlevel
         @test b1.growth == b0.growth
         @test b1.covered == b0.covered               # identical decisions
-        @test b1.worst ≈ b0.worst rtol = 1e-2
+
+        # The *error* cannot be held that tightly, and the factor is
+        # arithmetic rather than a fudge. `worst` is the L∞ of
+        # `u - u_exact` over the whole state, where `∂ₜu` reaches 17 while
+        # the error is 0.017 -- a cancellation of three orders. So the 7e-6
+        # relative divergence above lands here as ~1e-2, and measured it
+        # does: 1.3e-2 vertex-centred, 9e-4 cell-centred, the difference
+        # being only where each run's maximum happens to fall. The mesh
+        # assertions above are the exact ones; this is the sanity check
+        # that the two runs are the same run.
+        @test b1.worst ≈ b0.worst rtol = 3e-2
     end
 
     if !supports_float64(devbackend)
@@ -194,7 +237,7 @@ if DEVICE !== nothing
             # when the storage is allocated, rather than from inside a
             # kernel. See "Precision" in `CODE.md`.
             @test_throws "no hardware Float64" track_pulse(Float64, Val(1);
-                                                           roots=8, N=8, G=2,
+                                                           roots=8, N=8, G=1,
                                                            ops=DEVOPS,
                                                            backend=devbackend)
         end

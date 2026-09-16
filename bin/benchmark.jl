@@ -29,12 +29,22 @@
 # `--type=f32` is not optional on a device without hardware fp64: a
 # `Float64` field set is refused there, with the reason. See "Running on a
 # device" in `CODE.md`.
+#
+# `--centering=cell` runs the same phases on the cell-centred layout, so
+# that column can be read against the vertex one too.
 
+using TreeAMR: cellcentered, vertexcentered
 using TreeWave
 
 include(joinpath(@__DIR__, "backend.jl"))
 
 const FLOATTYPES = Dict("f32" => Float32, "f64" => Float64)
+
+# `--centering=` selects where the values sit, defaulting to vertex as the
+# rest of the package does. It changes the *stored* array -- a vertex-like
+# dimension holds one plane more -- so the reported `work=` differs between
+# the two columns even at an identical cell count.
+const CENTERINGS = Dict("vertex" => vertexcentered, "cell" => cellcentered)
 
 function main(args)
     dim = 2
@@ -57,6 +67,7 @@ function main(args)
     driver_roots = 16
     driver_n = 16
     T = Float64
+    makecentering = vertexcentered
     backendname = "cpu"
     for a in args
         if startswith(a, "--dim=")
@@ -80,6 +91,11 @@ function main(args)
             haskey(FLOATTYPES, tag) ||
                 error("unknown --type=$tag; expected f32 or f64")
             T = FLOATTYPES[tag]
+        elseif startswith(a, "--centering=")
+            tag = a[13:end]
+            haskey(CENTERINGS, tag) ||
+                error("unknown --centering=$tag; expected vertex or cell")
+            makecentering = CENTERINGS[tag]
         elseif startswith(a, "--backend=")
             backendname = a[11:end]
         elseif a == "--driver"
@@ -88,21 +104,26 @@ function main(args)
             driver = false
         else
             error("unknown argument $a; expected --dim=, --n=, --roots=, \
-                   --reps=, --steps=, --sigma=, --type=, --backend=, \
-                   --driver, --no-driver, --driver-roots=, --driver-n=")
+                   --reps=, --steps=, --sigma=, --type=, --centering=, \
+                   --backend=, --driver, --no-driver, --driver-roots=, \
+                   --driver-n=")
         end
     end
     dim in (1, 2, 3) || error("--dim must be 1, 2 or 3; got $dim")
+    centering = makecentering(dim)
 
     threads = Threads.nthreads()
     # Everything that touches the storage runs inside `withbackend`, which
     # is what makes a device package loaded a moment ago visible to it.
     return withbackend(backendname, T) do backend
         result = benchmark_phases(T, Val(dim); N=n, roots=roots, reps=reps,
-                                  steps=steps, σ=T(σ), backend=backend)
+                                  steps=steps, σ=T(σ), centering=centering,
+                                  backend=backend)
         s = result.sizes
         println("# threads=", threads, " type=", s.floattype,
-                " backend=", s.backend, " D=", s.D, " N=", s.N,
+                " backend=", s.backend,
+                " centering=", all(==(:vertex), s.centering) ? "vertex" : "cell",
+                " D=", s.D, " N=", s.N,
                 " roots=", s.roots, " blocks=", s.blocks, " cells=", s.cells,
                 " work=", round(s.workbytes / 2^20; digits=1), "MiB")
         for (name, seconds) in result.timings
@@ -124,7 +145,8 @@ function main(args)
             h0 = 1.0 / (driver_roots * driver_n)
             run = benchmark_driver(T; roots=driver_roots, N=driver_n,
                                    σ=5.12 * h0, chunk=0.01, t_end=0.05,
-                                   reps=2, backend=backend)
+                                   reps=2, centering=makecentering(2),
+                                   backend=backend)
             println(threads, "\ttrack_blast\t", round(run.seconds; sigdigits=4))
             println("# track_blast roots=", driver_roots, " N=", driver_n,
                     " blocks=", run.nblocks,

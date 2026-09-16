@@ -42,8 +42,8 @@ end
     # value has to stay the one the serial loop gave, whoever computes
     # it, and an upstream change of summation order would show up here
     # first.
-    forest = wave_forest(Val(2), 8, 2; roots=4)
-    fs = FieldSet(forest, 2)
+    forest = wave_forest(Val(2), 8; roots=4)
+    fs = FieldSet(forest, 2; G=1, centering=vertexcentered(2))
     fill_by_coordinates!(pulse_exact(2, 1.0, 0.25, 0.08, 0.0), fs)
 
     serial_scales(fs; vars=1:fs.nvars) =

@@ -1,8 +1,11 @@
-# The travelling super-Gaussian pulse: a localized feature, so what it
-# measures is whether a *moving* refined region follows it.
+# The travelling super-Gaussian pulse, **vertex-centred**: a localized
+# feature, so what it measures is whether a *moving* refined region
+# follows it.
 #
 # The mesh is steered by the per-cell criterion in `refinement.jl`; the
-# claims about the indicator itself are in `refinement_tests.jl`.
+# claims about the indicator itself are in `refinement_tests.jl`, and the
+# cell-centred run of the identical study is in
+# `supergaussian_cell_tests.jl`.
 
 @testset "A moving refined region tracks a propagating pulse" begin
     # The measure of "without artifacts" is that the adaptive run matches
@@ -22,7 +25,7 @@
     @test amr.maxlevel == 2
 
     # And the adaptive run is as accurate as the uniform fine one ...
-    @test amr.worst ≈ fine.err rtol = 0.1
+    @test amr.worst ≈ fine.err rtol = 0.1   # measured 0.09605 against 0.09300
     @test amr.worst < coarse.err / 5
     # ... for fewer cells, which is the point of doing this at all.
     @test amr.nblocks * 8 < fine.cells

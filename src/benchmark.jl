@@ -41,17 +41,20 @@ end
 
 """
     benchmark_phases([T], ::Val{D}; N, roots, G=2, ops, reps=5,
-                     backend=CPU(), ...)
+                     centering=vertexcentered(D), backend=CPU(), ...)
 
 Seconds per phase of the path an adaptive run actually pays for, on the
 two-level mesh [`wave_forest`](@ref) builds. Returns
 `(sizes=..., timings=[name => seconds, ...])` with the phases in the order
 a step visits them; the caller formats.
 
-`T` and `backend` are what they are everywhere else in the package: the
-type the run computes in and where it runs, defaulting to `Float64` on
-the host. A device column and a host column of this table can therefore
-be read against each other, which is the point of it.
+`T`, `centering` and `backend` are what they are everywhere else in the
+package: the type the run computes in, where its values sit, and where it
+runs — defaulting to `Float64`, vertex, and the host. A device column and
+a host column of this table can therefore be read against each other,
+which is the point of it, and so can a vertex column and a cell-centred
+one. Note that `workbytes` in the returned `sizes` differs between the
+two: a vertex-like dimension stores one plane more.
 
 The phases, and why each is here:
 
@@ -101,13 +104,14 @@ function benchmark_phases(::Type{T}, ::Val{D}; N, roots, G=2,
                           cfl=T(1//4), steps=10,
                           refine_tol=T(3//10), coarsen_tol=T(3//40),
                           maxlevel_cap=2, nr=2001, nk=2000,
+                          centering=vertexcentered(D),
                           backend::Backend=CPU()) where {T,D}
     heavy = max(2, reps ÷ 2)                     # for the allocating phases
     bestof(f, n) = best(f, n; backend=backend)
 
-    forest = wave_forest(T, Val(D), N, G; roots=roots, L=L)
-    fs = FieldSet(forest, 2; backend=backend)
-    schedule = GhostSchedule(forest, ops; T=T, backend=backend)
+    forest = wave_forest(T, Val(D), N; roots=roots, L=L)
+    fs = FieldSet(forest, 2; G=G, centering=centering, backend=backend)
+    schedule = GhostSchedule(fs, ops)
     problem = WaveProblem(fs, schedule)
 
     initial = pulse_exact(D, L, x0, σ, zero(T))
@@ -170,7 +174,8 @@ function benchmark_phases(::Type{T}, ::Val{D}; N, roots, G=2,
     sizes = (D=D, N=N, roots=roots, blocks=nleaves(forest),
              cells=nleaves(forest) * N^D, statelength=length(u),
              workbytes=sizeof(fs.work), nr=nr, nk=nk,
-             floattype=T, backend=nameof(typeof(backend)))
+             floattype=T, centering=centering,
+             backend=nameof(typeof(backend)))
     return (sizes=sizes, timings=timings)
 end
 
@@ -178,8 +183,8 @@ benchmark_phases(valD::Val; kwargs...) =
     benchmark_phases(Float64, valD; kwargs...)
 
 """
-    benchmark_driver([T]; roots, N, σ, chunk, t_end, reps=2, backend=CPU(),
-                     kwargs...)
+    benchmark_driver([T]; roots, N, σ, chunk, t_end, reps=2, G=2,
+                     centering=vertexcentered(2), backend=CPU(), kwargs...)
 
 Wall time for a whole [`track_blast`](@ref) run — evolution, error
 measurement, flagging, regridding and all — as the end-to-end number the
@@ -194,9 +199,11 @@ together and shrink `σ` to match — which is why every one of these is a
 keyword with no default.
 """
 function benchmark_driver(::Type{T}=Float64; roots, N, σ, chunk, t_end, reps=2,
+                          G=2, centering=vertexcentered(2),
                           backend::Backend=CPU(), kwargs...) where {T}
     run() = track_blast(T, Val(2); roots=roots, N=N, σ=T(σ), chunk=T(chunk),
-                        t_end=T(t_end), backend=backend, kwargs...)
+                        t_end=T(t_end), G=G, centering=centering,
+                        backend=backend, kwargs...)
     result = run()                               # also the warm-up
     seconds = Inf
     for _ in 1:reps

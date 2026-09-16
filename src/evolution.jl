@@ -6,15 +6,21 @@
 #
 # Variable 1 is `u`, variable 2 is `v`. The Laplacian is the standard
 # 2nd-order centered 3-point stencil per dimension, so the RHS needs only
-# a one-cell stencil — but see `WaveProblem` for why `G = 2` is
-# nonetheless the useful choice on a refined mesh.
+# a one-cell stencil — but see "Operator order" in `CODE.md` for why the
+# ghost width is nonetheless 1 (vertex-centred) or 2 (cell-centred) on a
+# refined mesh.
+#
+# Nothing here knows the centering. The kernel reads its own point and
+# its two neighbours a spacing away, which is the same stencil wherever
+# those points sit, so `wave_rhs_kernel!` takes no `Val(C)` — the whole
+# of the staggered port, in this file, is that `G` is a tuple.
 
 @kernel function wave_rhs_kernel!(du, @Const(work), @Const(spacings),
                                   ::Val{D}, ::Val{G}) where {D,G}
     I = @index(Global, NTuple)                 # (i1..iD, block)
     b = I[D + 1]
     inner = ntuple(d -> I[d], Val(D))          # state-layout index
-    c = ntuple(d -> I[d] + G, Val(D))          # working-array index
+    c = ntuple(d -> I[d] + G[d], Val(D))       # working-array index
 
     u0 = work[c..., 1, b]
     laplacian = zero(eltype(du))
@@ -40,6 +46,10 @@ above changes for a device — that is the whole point of writing the RHS
 as a kernel in the first place — but a host `Vector` of spacings would
 be the wrong memory, and `V` is a type parameter rather than
 `Vector{T}` so that it can be the right one.
+
+`G` is an `NTuple{D,Int}` from TreeAMR's M8 on, because the ghost width
+belongs to the field set and is one width per dimension. It is read from
+`fs`, never from the forest, which no longer carries it.
 """
 struct WaveProblem{T,D,G,F,S,V}
     fs::F
@@ -52,7 +62,7 @@ end
 # D and G are carried as Val parameters so the kernel specializes on
 # them once, rather than rebuilding them at every RHS evaluation.
 function WaveProblem(fs::FieldSet{T,D}, schedule) where {T,D}
-    G = fs.forest.G
+    G = fs.G
     spacings = to_backend(get_backend(fs.work), block_spacings(fs.forest, T))
     return WaveProblem{T,D,G,typeof(fs),typeof(schedule),typeof(spacings)}(
         fs, schedule, spacings, Val(D), Val(G))

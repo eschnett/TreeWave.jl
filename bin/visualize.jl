@@ -7,6 +7,7 @@
 #     julia --project=bin bin/visualize.jl --case=pulse --n=2 --out=/tmp
 #     julia --project=bin bin/visualize.jl --case=sine --ops=2
 #     julia --project=bin bin/visualize.jl --type=f32
+#     julia --project=bin bin/visualize.jl --centering=cell
 #     julia --project=bin bin/visualize.jl --backend=metal --type=f32
 #
 # The figures are written as PNGs and, when stdout is a terminal, also
@@ -48,15 +49,15 @@ const LEVELCOLORS = Makie.wong_colors()
 levelcolor(lvl) = LEVELCOLORS[mod1(lvl + 1, length(LEVELCOLORS))]
 
 """
-The refinement indicator per interior cell of one block, in 1D -- the
-per-cell quantity `cell_indicator` reduces to a single verdict. Recomputed
+The refinement indicator per owned point of one block, in 1D -- the
+per-point quantity `cell_indicator` reduces to a single verdict. Recomputed
 here rather than returned by the criterion, because the criterion only ever
 needs the maximum and the bounding box.
 """
 function block_taus(fs, b, scales; vars=1:fs.nvars,
                     ε=oftype(float(first(scales)), 1//100))
     forest = fs.forest
-    G, N = forest.G, forest.N
+    G, N = fs.G[1], forest.N
     ws = [blockview(fs, b, v) for v in vars]
     return [maximum(lohner(w[i - 1], w[i], w[i + 1], s; ε=ε)
                     for (w, s) in zip(ws, scales))
@@ -85,14 +86,17 @@ function snapshot(fs, t, u, exactf)
     fs = hostcopy(fs)
     u = Array(u)
     forest = fs.forest
-    G, N = forest.G, forest.N
+    G, N = fs.G[1], forest.N
 
     scales = field_scales(fs)
     blocks = map(1:nblocks(fs)) do b
         k = blockkey(fs, b)
-        # `cell_center` indexes the *stored* array, so interior cell i is
-        # at index i + G.
-        x = [cell_center(forest, k, (i + G,))[1] for i in 1:N]
+        # `coordinates` indexes the *stored* array, so owned point i is at
+        # index i + G. It takes the field set rather than the forest
+        # because where a point sits depends on the ghost width and the
+        # centering, both of which live there: a cell centre is half a
+        # spacing inside the block, a vertex is on its low edge.
+        x = [coordinates(fs, b, (i + G,))[1] for i in 1:N]
         num = collect(interiorview(fs, b, 1))
         exact = [exactf((xi,), 1) for xi in x]
         ext = block_extent(forest, k)[1]
@@ -104,7 +108,7 @@ function snapshot(fs, t, u, exactf)
 
     # Norms are taken over the whole state vector -- both u and ∂ₜu -- so
     # they are the same quantity the tests assert on.
-    exactfs = FieldSet(forest, 2)
+    exactfs = FieldSet(forest, 2; G=fs.G, centering=fs.centering)
     fill_by_coordinates!(exactf, exactfs)
     ue = statevector(exactfs)
     gather!(ue, exactfs)
@@ -224,20 +228,21 @@ period `cos(ωT) = 0`, so `u` itself vanishes and the solution panel would
 show nothing but the error again.
 """
 function sinecase(::Type{T}=Float64; D=1, N=16, L=one(T), m=1, roots=4,
-                 periods=T(9//10), ops_order=4, backend=CPU()) where {T}
-    # G is set by the operator order, not chosen independently: TreeAMR
-    # requires G >= prolongation/2 for point-value operators.
-    G = ops_order ÷ 2
+                 periods=T(9//10), ops_order=4,
+                 centering=vertexcentered(1), backend=CPU()) where {T}
+    G = viewer_ghosts(ops_order, centering)
     snaps = []
     observer = (fs, t, u) -> push!(snaps, snapshot(fs, t, u,
                                                   wave_exact(D, L, m, t)))
     r = wave_errors(T, Val(D); N=N, G=G, roots=roots, L=L, m=m, periods=periods,
                     ops=Operators(prolongation=ops_order,
                                   restriction=ops_order),
+                    centering=centering,
                     backend=backend, observer=observer, nsnapshots=97)
     title = @sprintf("Standing sine mode, m = %d — two-level mesh, order-%d \
-                      operators, %s\nfinal L2 = %.3g, L∞ = %.3g at h = %.3g",
-                     m, ops_order, T, r.l2, r.linf, r.h)
+                      operators, %s, %s\nfinal L2 = %.3g, L∞ = %.3g at h = %.3g",
+                     m, ops_order, T, centeringname(centering),
+                     r.l2, r.linf, r.h)
     # The overlay is evaluated at the last *snapshot* time, which `snapshot`
     # has already converted to Float64 -- so hand the exact solution the
     # run's own type back, or it would be built in Float64.
@@ -254,8 +259,8 @@ regrid costs.
 function pulsecase(::Type{T}=Float64; D=1, N=8, L=one(T), roots=8, σ=T(2//25),
                   x0=T(1//4), n=1, t_end=T(1//2), chunk=T(1//50), ops_order=4,
                   refine_tol=T(3//10), coarsen_tol=T(3//40),
-                  backend=CPU()) where {T}
-    G = ops_order ÷ 2
+                  centering=vertexcentered(1), backend=CPU()) where {T}
+    G = viewer_ghosts(ops_order, centering)
     snaps = []
     observer = (fs, t, u) -> push!(snaps, snapshot(fs, t, u,
                                     pulse_exact(D, L, x0, σ, t; n=n)))
@@ -263,12 +268,13 @@ function pulsecase(::Type{T}=Float64; D=1, N=8, L=one(T), roots=8, σ=T(2//25),
                     ops=Operators(prolongation=ops_order,
                                   restriction=ops_order),
                     t_end=t_end, chunk=chunk, refine_tol=refine_tol,
-                    coarsen_tol=coarsen_tol, backend=backend,
-                    observer=observer)
-    title = @sprintf("Travelling super-Gaussian pulse, n = %d, σ = %.3g, %s — \
-                      refinement tracks it\nworst L∞ = %.3g over the run, \
+                    coarsen_tol=coarsen_tol, centering=centering,
+                    backend=backend, observer=observer)
+    title = @sprintf("Travelling super-Gaussian pulse, n = %d, σ = %.3g, %s, %s \
+                      — refinement tracks it\nworst L∞ = %.3g over the run, \
                       %d blocks at maxlevel %d",
-                     n, σ, T, r.worst, r.nblocks, r.maxlevel)
+                     n, σ, T, centeringname(centering),
+                     r.worst, r.nblocks, r.maxlevel)
     return (snaps=snaps,
             exactf=pulse_exact(D, L, x0, σ, T(snaps[end].t); n=n),
             L=L, title=title,
@@ -282,6 +288,23 @@ end
 # would be an invitation to a confusing failure.
 const FLOATTYPES = Dict("f32" => Float32, "f64" => Float64)
 
+# `--centering=` selects where the values sit. Vertex is the default, as
+# it is throughout the package; `cell` renders the comparison.
+const CENTERINGS = Dict("vertex" => vertexcentered, "cell" => cellcentered)
+
+centeringname(centering) = all(==(:vertex), centering) ? "vertex-centred" :
+                           "cell-centred"
+
+"""
+The ghost width the operator order needs, which is not a free choice and
+is not the same on both layouts: order-`p` prolongation reaches `p/2`
+planes past a cell-centred interface and `p/2 - 1` planes past a vertex
+dimension's shared plane, and the Laplacian needs one either way. See
+"Operator order" in `CODE.md`.
+"""
+viewer_ghosts(ops_order, centering) =
+    max(1, ops_order ÷ 2 - (all(==(:vertex), centering) ? 1 : 0))
+
 function main(args)
     case = "both"
     outdir = joinpath(@__DIR__, "output")
@@ -290,6 +313,8 @@ function main(args)
     ops_order = 4
     T = Float64
     typetag = ""
+    centeringtag = ""
+    makecentering = vertexcentered
     backendname = "cpu"
     # Sixel is for a human looking at a terminal; a pipe gets the paths.
     inline = stdout isa Base.TTY
@@ -312,6 +337,14 @@ function main(args)
             # The default type keeps the plain filename, so a Float32 render
             # never overwrites the figure CI checks.
             typetag = tag == "f64" ? "" : "_$tag"
+        elseif startswith(a, "--centering=")
+            tag = a[13:end]
+            haskey(CENTERINGS, tag) ||
+                error("--centering must be vertex or cell; got $tag")
+            makecentering = CENTERINGS[tag]
+            # As with --type=, the default keeps the plain filename so a
+            # cell-centred render never overwrites the figure CI checks.
+            centeringtag = tag == "vertex" ? "" : "_$tag"
         elseif startswith(a, "--backend=")
             backendname = a[11:end]
         elseif a == "--display"
@@ -320,8 +353,8 @@ function main(args)
             inline = false
         else
             error("unknown argument $a; expected --case=, --out=, --n=, \
-                   --ops=, --dim=, --type=, --backend=, --display, \
-                   --no-display")
+                   --ops=, --dim=, --type=, --centering=, --backend=, \
+                   --display, --no-display")
         end
     end
     case in ("both", "sine", "pulse") ||
@@ -331,6 +364,8 @@ function main(args)
     # different argument.
     dim == 1 || error("only --dim=1 is implemented; got $dim")
 
+    centering = makecentering(dim)
+
     mkpath(outdir)
     # Everything that touches the storage runs inside `withbackend`, which
     # is what makes a device package loaded a moment ago visible to it.
@@ -338,16 +373,19 @@ function main(args)
         paths = String[]
         for (name, build) in (("sine", () -> sinecase(T; D=dim,
                                                       ops_order=ops_order,
+                                                      centering=centering,
                                                       backend=backend)),
                               ("pulse", () -> pulsecase(T; D=dim, n=n,
                                                         ops_order=ops_order,
+                                                        centering=centering,
                                                         backend=backend)))
             (case == "both" || case == name) || continue
             @info "running the $name case"
             c = build()
             fig = makefigure(c.snaps, c.exactf, c.L, c.title; tols=c.tols,
                              steering=c.steering)
-            path = joinpath(outdir, "$(name)_$(dim)d$(typetag).png")
+            path = joinpath(outdir,
+                            "$(name)_$(dim)d$(typetag)$(centeringtag).png")
             save(path, fig)
             inline && display(fig)
             push!(paths, path)

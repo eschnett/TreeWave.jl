@@ -44,7 +44,7 @@ there, a new field set over the same forest otherwise.
 
 This is for the consumers that cannot be moved onto a device rather than
 for ones that have not been. The viewers in `bin/` are the case: they read
-single cells through [`blockview`](@ref) and [`cell_center`](@ref) and hand
+single cells through [`blockview`](@ref) and [`coordinates`](@ref) and hand
 them to CairoMakie, which is host code by nature, so the data has to come
 down whatever the run was computed on. One copy at the top of a snapshot
 buys that, and every line of figure code below it is unchanged.
@@ -57,7 +57,11 @@ that stay where the data is. See "Running on a device" in `CODE.md`.
 """
 function hostcopy(fs::FieldSet{T}) where {T}
     get_backend(fs.work) isa CPU && return fs
-    host = FieldSet{T}(fs.forest, fs.nvars)
+    # The whole layout, not merely the forest: a field set carries its own
+    # ghost width and centering from TreeAMR's M8 on, and either one left
+    # at its default would give the copy a differently shaped working
+    # array — which `copyto!` would then reject, or worse, accept.
+    host = FieldSet{T}(fs.forest, fs.nvars; G=fs.G, centering=fs.centering)
     copyto!(host.work, fs.work)
     return host
 end

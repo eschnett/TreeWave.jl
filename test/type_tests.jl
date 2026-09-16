@@ -32,6 +32,14 @@
 # pointing at `MultiFloats.use_bigfloat_transcendentals()`, which evals
 # BigFloat-backed methods into Base. TreeWave does not call that, as
 # TreeAMR does not; see "Precision" in CODE.md.
+#
+# These run vertex-centred, at the package default, and are not doubled
+# for cell centring: precision and layout are independent questions, the
+# arithmetic each driver performs per point is the same either way, and
+# what the cell-centred path would add here is runtime rather than a
+# claim. The one place the two interact -- whether the *mesh* the
+# criterion chooses is the same at Float32 as at Float64 -- is asserted
+# below, and the cell-centred answer to it is in `CODE.md`.
 
 using MultiFloats: Float32x2
 
@@ -40,7 +48,7 @@ const FLOATTYPES = (Float64, Float32, Float32x2)
 
 # Short enough that the MultiFloat run is affordable, long enough that the
 # mesh is rebuilt several times.
-shortpulse(T) = (; roots=8, N=8, G=2, σ=T(2//25), t_end=T(1//10), ops=TYPEOPS)
+shortpulse(T) = (; roots=8, N=8, G=1, σ=T(2//25), t_end=T(1//10), ops=TYPEOPS)
 
 @testset "Base's gaps at a software float are bridged: T=$T" for T in FLOATTYPES
     # `mod`, `ceil(Int, ·)` and `Float64(·)` are all MethodErrors at a
@@ -74,16 +82,29 @@ end
     @test a.worst isa T
     @test a.tracking isa T
     @test isfinite(a.worst)
-    @test a.tracking == 1                              # the peak never escapes
     @test a.maxlevel == 2
+
+    # The peak never escapes onto a coarse block, so the ratio of the
+    # refined peak to the global one is one. Exactly one at a hardware
+    # float -- the two are the same number, measured from the same block
+    # -- but only to roundoff at a MultiFloat, whose division is not
+    # correctly rounded: `x / x` differs from 1 by an ulp for about an
+    # eighth of all `Float32x2` values, this one included. That is a
+    # property of the software float and not of the run, which is why
+    # the exact claim is still made for the types that can carry it.
+    if T <: Base.IEEEFloat
+        @test a.tracking == 1
+    else
+        @test a.tracking ≈ 1
+    end
 
     # The indicator too: it is where the ε noise floor lives, and a bare
     # `0.01` there would drag every τ into Float64 whatever the field holds.
-    forest = Forest{T}((8,); N=8, G=2, periodic=(true,),
+    forest = Forest{T}((8,); N=8, periodic=(true,),
                        extents=((zero(T), one(T)),))
-    fs = FieldSet(forest, 2)
+    fs = FieldSet(forest, 2; G=1, centering=vertexcentered(1))
     fill_by_coordinates!(pulse_exact(1, one(T), T(1//4), T(2//25), zero(T)), fs)
-    fill_ghosts!(fs, GhostSchedule(forest, TYPEOPS))
+    fill_ghosts!(fs, GhostSchedule(fs, TYPEOPS))
     scales = field_scales(fs)
     @test scales isa Vector{T}
     @test cell_indicator(fs, 1, Inf; scales=scales)[1] isa T
@@ -94,7 +115,7 @@ end
                                                                          Float32)
     # Not for a MultiFloat: this case is built on `sin` and `cos`, which
     # MultiFloats does not implement. See the header.
-    r = wave_errors(T, Val(1); N=8, G=2, ops=TYPEOPS)
+    r = wave_errors(T, Val(1); N=8, G=1, ops=TYPEOPS)
     @test r.l2 isa T
     @test r.linf isa T
     @test r.h isa T
@@ -108,7 +129,7 @@ end
     # the criterion chooses is precision-insensitive even where the error
     # is not. If it were not, a Float32 run would stop being a rehearsal
     # for the Float64 one and become a different experiment.
-    kw = (roots=8, N=8, G=2, ops=TYPEOPS)
+    kw = (roots=8, N=8, G=1, ops=TYPEOPS)
     a64 = track_pulse(Float64, Val(1); kw..., σ=0.08, chunk=0.02)
     a32 = track_pulse(Float32, Val(1); kw..., σ=0.08f0, chunk=0.02f0)
 
