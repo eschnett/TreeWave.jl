@@ -12,5 +12,5 @@ TreeAMR = "91bc416d-811c-44c1-9bc4-b9c8bbdbbd08"
 TreeWave = "6acacbb1-3a21-4f63-beb8-8f5fda648e50"
 
 [sources]
-TreeAMR = {url = "https://github.com/eschnett/TreeAMR.jl", rev = "m8"}
+TreeAMR = {url = "https://github.com/eschnett/TreeAMR.jl", rev = "main"}
 TreeWave = {path = ".."}

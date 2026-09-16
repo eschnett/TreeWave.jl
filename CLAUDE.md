@@ -76,14 +76,15 @@ nearly all of it compiling the two firing kernels.
   `~/src/jl/TreeAMR` working copy is *not* what is being tested. If a
   TreeAMR change is needed, say so rather than editing that checkout and
   assuming the tests see it. Note the remote has no `master` branch — only
-  `main`, `m8` and `gh-pages`.
-- **The pin is currently `rev = "m8"`, in both `Project.toml` and
-  `bin/Project.toml`.** M8 is what moved `G` onto the field set, added
-  centerings, and changed `GhostSchedule` and `regrid!`; nothing here
-  builds against TreeAMR's `main` until `m8` is merged there. Flipping
-  both back to `rev = "main"` is the last commit before merging this, and
-  it turns CI red until upstream's `main` has M8 — so it is the user's
-  call, not a tidy-up.
+  `main` and `gh-pages`.
+- **The pin is `rev = "main"`, in both `Project.toml` and
+  `bin/Project.toml`.** There are two of them, and a change that updates
+  only the first leaves `julia --project=bin bin/visualize.jl` resolving
+  a branch that may no longer exist — grep for `rev =` rather than
+  editing from memory. It was `rev = "m8"` while M8 was unmerged (M8 is
+  what moved `G` onto the field set, added centerings, and changed
+  `GhostSchedule` and `regrid!`); upstream's `main` has M8 from
+  2026-09-16, and both pins moved back with it.
 - **`[sources]` in `Project.toml` is what makes a clean checkout resolve.**
   TreeAMR is unregistered and `Manifest.toml` is untracked, so without it
   `Pkg.instantiate()` fails with "expected package TreeAMR to be
