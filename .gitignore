@@ -2,6 +2,8 @@
 *.swp
 .DS_Store
 /docs/build/
+*.cov
+/lcov.info
 Manifest.toml
 /bin/output/
 TODO.md

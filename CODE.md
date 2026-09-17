@@ -1270,7 +1270,7 @@ already three near-identical time-stepping loops in `src/`; a fourth in
 | `bin/benchmark.jl` | the benchmark's CLI — the one script in `bin/` that uses the *package* environment, since it needs no CairoMakie |
 | `bin/benchmark.sbatch` | the thread and page-placement sweep; a SLURM job and an ordinary shell script at once |
 | `bin/backend.jl` | `--backend=`, shared by all three scripts: loads a device package on demand and runs the work in the world that load created |
-| `.github/workflows/CI.yml` | tests on a Julia matrix, at one thread and at four, plus a job that renders the figures on both layouts |
+| `.github/workflows/CI.yml` | tests on a Julia matrix, at one thread and at four, plus a job that renders the figures on both layouts; coverage is collected and uploaded from the single-threaded cells only |
 
 `bin/visualize.jl` draws four panels per 1D case — the solution, the
 pointwise error in `u`, the indicator τ, and the volume-weighted L2/L∞

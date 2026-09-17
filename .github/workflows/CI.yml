@@ -34,6 +34,14 @@ jobs:
       - uses: julia-actions/cache@v3
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
+        with:
+          # Coverage exactly on the single-threaded cells. The threaded
+          # cell is the expensive one -- a 4-vCPU runner is oversubscribed
+          # by `--threads=4` plus the subprocess the thread-independence
+          # test spawns -- and it runs the same lines as the serial cells
+          # anyway, so instrumenting it would buy nothing and cost the
+          # slowest job in the matrix.
+          coverage: ${{ (matrix.threads || 1) == 1 }}
         env:
           # The suite must pass, with identical numbers, threaded as well
           # as serial (M5). One entry of the matrix is enough to guard
@@ -41,6 +49,15 @@ jobs:
           # *other* count either way, so between this job and the serial
           # ones both directions are covered.
           JULIA_NUM_THREADS: ${{ matrix.threads || 1 }}
+      - uses: julia-actions/julia-processcoverage@v1
+        if: ${{ (matrix.threads || 1) == 1 }}
+      - uses: codecov/codecov-action@v5
+        if: ${{ (matrix.threads || 1) == 1 }}
+        with:
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          # A Codecov outage should not turn a green test run red.
+          fail_ci_if_error: false
 
   # The viewer has its own environment and its own copy of the TreeAMR
   # dependency, so the test job above cannot exercise it -- during
