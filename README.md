@@ -1,6 +1,7 @@
 # TreeWave.jl
 
 [![CI](https://github.com/eschnett/TreeWave.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/eschnett/TreeWave.jl/actions/workflows/CI.yml)
+[![codecov](https://codecov.io/gh/eschnett/TreeWave.jl/graph/badge.svg?token=VBEVO2ZL6E)](https://codecov.io/gh/eschnett/TreeWave.jl)
 
 `TreeWave` solves the scalar wave equation in 2nd-order form, as a
 sample application for
