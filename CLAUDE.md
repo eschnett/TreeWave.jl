@@ -18,6 +18,14 @@ Run the tests:
 julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
+And, because the RHS kernel is `@inbounds`, also run them with the
+checks put back -- this is what CI does, and it is the only thing that
+can catch the annotation being wrong:
+
+```bash
+julia --project=. -e 'using Pkg; Pkg.test(; julia_args = ["--check-bounds=yes"])'
+```
+
 Run the viewer (separate environment, so CairoMakie is not a package
 dependency):
 
@@ -153,6 +161,25 @@ nearly all of it compiling the two firing kernels.
   to the discretization error the sweeps measure. `CODE.md` records this;
   `test/type_tests.jl` asserts the mesh the criterion chooses instead,
   which *is* precision-insensitive.
+- **The RHS kernel's `@inbounds` is load-bearing in both directions.**
+  It is 6.5x on `wave_rhs_kernel!` (the checks stop the stencil
+  vectorizing, so this is not a constant factor per load), and it is an
+  assertion that only `--check-bounds=yes` can falsify -- which is why
+  `.github/workflows/CI.yml` *states* `check_bounds: 'yes'` instead of
+  inheriting the action's default. Do not drop that line to make a CI
+  edit smaller. Run the suite both ways: the checked run never executes
+  the optimized code, and the plain run is the only one that can catch a
+  wrong answer rather than a wrong index.
+- **`@inbounds` does not cross a call that is not
+  `@propagate_inbounds`.** It reaches an inlined callee only if that
+  callee says so, and an anonymous closure never does, so
+  `@inbounds ntuple(v -> work[...], ...)` keeps its checks while
+  `ntuple(v -> @inbounds(work[...]), ...)` does not. `cell_tau` in
+  `src/refinement.jl` is an `@inline` helper that reads `work` for its
+  callers and is *not* marked, and is deliberately left that way -- the
+  criterion is regrid-frequency, not per-evaluation. If that ever
+  changes, annotate inside `cell_tau`; an `@inbounds` at the call site
+  would silently do nothing.
 - **A parallel loop here must be bit-identical to the serial one.** That is
   TreeAMR's M5 invariant and the whole application inherits it: write one
   slot per block and combine the partials in a fixed order, never

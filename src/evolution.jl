@@ -22,17 +22,25 @@
     inner = ntuple(d -> I[d], Val(D))          # state-layout index
     c = ntuple(d -> I[d] + G[d], Val(D))       # working-array index
 
-    u0 = work[c..., 1, b]
+    # `@inbounds` below is an assertion, not a hope: `map_blocks!` runs the
+    # global index over the owned range and nothing else, and the stencil
+    # reaches one point past `c`, which is what `G >= 1` guarantees is
+    # there. It is worth the noise because the checks were not a constant
+    # factor per load — they kept this stencil from vectorizing at all —
+    # and it stays honest because CI runs the suite with
+    # `--check-bounds=yes`, which overrides every `@inbounds` here and
+    # re-checks each index. See "What bounds checking costs" in `CODE.md`.
+    @inbounds u0 = work[c..., 1, b]
     laplacian = zero(eltype(du))
-    for d in 1:D
+    @inbounds for d in 1:D
         up = Base.setindex(c, c[d] + 1, d)
         um = Base.setindex(c, c[d] - 1, d)
         laplacian += work[up..., 1, b] - 2 * u0 + work[um..., 1, b]
     end
-    h = spacings[b]
+    @inbounds h = spacings[b]
 
-    du[inner..., 1, b] = work[c..., 2, b]
-    du[inner..., 2, b] = laplacian / (h * h)
+    @inbounds du[inner..., 1, b] = work[c..., 2, b]
+    @inbounds du[inner..., 2, b] = laplacian / (h * h)
 end
 
 """
