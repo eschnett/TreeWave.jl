@@ -100,6 +100,84 @@ is type-unstable by design; it is called once per chunk, never per step.
 There is no `Val{C}`: the centering never reaches the kernel, because the
 stencil does not depend on it. See Centerings.
 
+## What bounds checking costs
+
+`wave_rhs_kernel!`'s reads are `@inbounds`, and that annotation is worth
+more than it looks. On the two-level mesh `wave_forest` builds at
+`D = 3`, `N = 16`, 3 roots per edge -- 34 blocks, one thread, Julia
+1.13.0 on an Apple M3 Pro -- with the kernel timed through `map_blocks!`
+as best of 30:
+
+| | without `@inbounds` | with |
+|---|---|---|
+| `wave_rhs_kernel!` via `map_blocks!` | 0.727 ms | **0.111 ms** |
+| the whole `wave_rhs!` | 3.41 ms | 2.74 ms |
+
+**6.5x on the kernel, 20% on the right-hand side.** The two numbers
+differ by that much because the ghost fill dominates a refined mesh, and
+that is the honest framing of what this buys: the kernel is not where
+most of an evaluation goes. On a uniform mesh, or at larger `N` where
+the interior-to-boundary ratio grows, its share is larger and so is the
+gain.
+
+The 6.5x is out of proportion to the number of checks removed, and that
+is the part worth understanding. A 2nd-order Laplacian is a stencil that
+vectorizes cleanly, and the bounds checks were preventing it. This is
+not a constant factor saved on each load; it is the difference between a
+scalar loop and a vector one. `du` is bit-identical either way -- the
+same `sum(abs, du)` to the last digit -- which is the only acceptable
+outcome for a change that removes no arithmetic.
+
+**Why it is safe, and how that stays checkable.** Every index the kernel
+forms comes from `map_blocks!`, whose contract is that the global index
+runs over the owned range and nothing else; the kernel adds `G[d]` to
+reach the working array and reads one point either side, which is what
+`G >= 1` guarantees is in bounds and what `cell_indicator` already
+refuses to run without. That makes `@inbounds` an assertion, and an
+assertion wants to be falsifiable: `--check-bounds=yes` overrides
+`@inbounds` package-wide, so a run under it re-checks every index the
+kernel forms. `.github/workflows/CI.yml` therefore *states*
+`check_bounds: 'yes'` rather than leaning on the action's default. The
+flag is already that default, so this changes no behaviour today; the
+point is that the package now depends on it, and a default that quietly
+changed would turn the assertion into memory corruption rather than a
+test failure.
+
+The two test runs prove different things, and neither covers the other.
+`Pkg.test(; julia_args = ["--check-bounds=yes"])` re-checks every index
+and, precisely because it disables `@inbounds`, never runs the code the
+annotation actually produces. Plain `Pkg.test()` is the only one that
+exercises the optimized path, and so the only one that can catch a wrong
+*answer* rather than an out-of-range index. A change that passes the
+first and not the second has moved the numbers; one that passes the
+second and not the first is reading out of bounds and getting away with
+it today. Run both.
+
+**One trap before generalising this.** `@inbounds` propagates into an
+inlined callee only if that callee is marked `@propagate_inbounds`. An
+anonymous closure is not, so
+
+    vals = @inbounds ntuple(v -> work[c..., v, b], Val(NV))   # checks remain
+    vals = ntuple(v -> @inbounds(work[c..., v, b]), Val(NV))  # checks removed
+
+are not the same thing. The RHS kernel reads its array directly and does
+not hit this, but the same rule bites through ordinary calls and this
+package has one: `cell_tau` in `src/refinement.jl` is an `@inline`
+helper that reads `work` on behalf of its callers and is not marked
+`@propagate_inbounds`, so an `@inbounds` at a call site would not reach
+inside it. It is deliberately left alone -- the criterion runs at regrid
+frequency rather than per evaluation, so the case for it is much weaker
+-- and if it is ever worth doing, the annotation belongs *in* `cell_tau`,
+or `cell_tau` needs `@propagate_inbounds` so that its callers can
+decide. Not at the call site, on the assumption that it reaches.
+
+This is the one finding that transferred from TreeAMR's ghost-exchange
+performance pass; see "What the ghost fill costs" in its `CODE.md`. The
+other three there are specific to the mesh. TreeWave's kernels go
+through `map_blocks!`, which already launches a `D + 1`-dimensional
+ndrange, so there is no flattened box to un-flatten, and no hot kernel
+here loops `CartesianIndices` over a compile-time constant.
+
 ## Initial conditions
 
 The three are not variations on a theme. Each measures something the
@@ -1464,6 +1542,13 @@ than as a test that merely still passes.
   against 0.1225, the same factor). This is the pair the
   viewer draws side by side (`--ops=2`), and the pointwise error goes from
   smooth across the coarse-fine interfaces to visibly kinked at them.
+- `@inbounds` on the RHS kernel, `D = 3`, `N = 16`, 3 roots, 34 blocks,
+  one thread: `wave_rhs_kernel!` 0.727 ms without against **0.111 ms**
+  with, and the whole `wave_rhs!` 3.41 ms against 2.74 ms -- 6.5x on the
+  kernel and 20% on the evaluation, with `du` bit-identical. The gap
+  between the two ratios is the ghost fill, which dominates a refined
+  mesh. The full argument, and why CI states `check_bounds: 'yes'`, is
+  under [What bounds checking costs](#what-bounds-checking-costs).
 - Thread scaling on 64 cores (AMD EPYC, 8 NUMA domains; 1792 blocks of
   `128²`, 29.4M points): **12.7× on the RHS path (16.7× with the pages
   interleaved), 3.6× on a whole RK4 step**, 38–48× on the compute-bound

@@ -33,8 +33,16 @@ jobs:
           version: ${{ matrix.version }}
       - uses: julia-actions/cache@v3
       - uses: julia-actions/julia-buildpkg@v1
+      # `check_bounds: yes` is the action's default, but it is stated here
+      # because the package now relies on it: the RHS kernel's reads are
+      # `@inbounds` (see "What bounds checking costs" in CODE.md), and
+      # `--check-bounds=yes` overrides `@inbounds` package-wide, so this
+      # is the only place a stencil that walks out of its block would be
+      # caught. A default that quietly changed would turn the assertion
+      # into memory corruption rather than a test failure.
       - uses: julia-actions/julia-runtest@v1
         with:
+          check_bounds: 'yes'
           # Coverage exactly on the single-threaded cells. The threaded
           # cell is the expensive one -- a 4-vCPU runner is oversubscribed
           # by `--threads=4` plus the subprocess the thread-independence
