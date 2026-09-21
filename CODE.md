@@ -1391,7 +1391,7 @@ The tests are ported from TreeAMR's own `test/wave_tests.jl`, minus its
 `scatter!`/`gather!` contract rather than anything about the wave
 equation, and belongs upstream where it already lives.
 
-CI runs the test suite on Julia 1.11 and release, on Linux and macOS, and
+CI runs the test suite on Julia 1.10 and release, on Linux and macOS, and
 separately renders all three figures — plus the pulse at `Float32`, whose
 conversions the default render does not exercise, and all three again
 cell-centred, which is the one comparison where something visibly moves
@@ -1416,16 +1416,27 @@ cannot check is that a device run *works* — for that, add a device
 package to an environment of your own and set `TREEWAVE_TEST_BACKEND`;
 see [Running on a device](#running-on-a-device).
 
-Julia 1.11 is the floor, and not by preference: TreeAMR is unregistered, so
-`Project.toml` locates it with a `[sources]` entry, which 1.11 introduced.
-Without it a clean checkout cannot resolve at all — `Manifest.toml` is not
-tracked, and Project.toml alone carries only a UUID — which is also why CI
-was impossible before this.
+Julia 1.10 is the floor. It was 1.11 while TreeAMR was unregistered: a
+clean checkout could not resolve at all without the `[sources]` entry that
+locates TreeAMR — `Manifest.toml` is not tracked, and `Project.toml` alone
+carries only a UUID — and `[sources]` is a 1.11 key, which is also why CI
+was impossible before it. TreeAMR is registered now, so that argument has
+expired and the floor drops to the LTS.
+
+The `[sources]` entry stays anyway, because this package is developed
+against TreeAMR's `main`, which runs ahead of the release. That gives the
+1.10 job a second use beyond the floor: 1.10 does not know the key, ignores
+it *silently*, and resolves the registered TreeAMR instead — so it is the
+one job in the matrix that builds against a released TreeAMR rather than
+against a branch. A TreeAMR change this package starts to need before it is
+released fails there and nowhere else, and the fix is a TreeAMR release.
 
 Visualization lives in `bin/` and not in the package because CairoMakie is
 a heavy dependency that nothing in `src/` needs. `bin/` carries its own
 `Project.toml` with a `[sources]` entry pointing at the package root, so
-`julia --project=bin bin/visualize.jl` works from a fresh checkout.
+`julia --project=bin bin/visualize.jl` works from a fresh checkout. That
+path entry is a real dependence on `[sources]`, so the viewer environment
+still needs 1.11 even though the package itself no longer does.
 
 ## Measured results
 

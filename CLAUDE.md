@@ -47,7 +47,7 @@ reuse it:
 
 ```bash
 julia --project=/tmp/twgpu -e 'using Pkg; Pkg.develop(path=".")
-    Pkg.add(url="https://github.com/eschnett/TreeAMR.jl", rev="main")
+    Pkg.add(name="TreeAMR", rev="main")
     Pkg.add(["Metal", "KernelAbstractions", "MultiFloats",
              "OrdinaryDiffEqLowOrderRK", "SciMLBase", "SpecialFunctions",
              "Test"])'
@@ -93,12 +93,19 @@ nearly all of it compiling the two firing kernels.
   what moved `G` onto the field set, added centerings, and changed
   `GhostSchedule` and `regrid!`); upstream's `main` has M8 from
   2026-09-16, and both pins moved back with it.
-- **`[sources]` in `Project.toml` is what makes a clean checkout resolve.**
-  TreeAMR is unregistered and `Manifest.toml` is untracked, so without it
-  `Pkg.instantiate()` fails with "expected package TreeAMR to be
-  registered". That entry is why the Julia floor is 1.11, not 1.10. To check
-  a change end-to-end the way CI will see it:
+- **`[sources]` no longer makes a clean checkout resolve — it pins to a
+  branch.** TreeAMR is in the General registry as of 2026-09-21, so
+  `Pkg.instantiate()` works without the entry; what the entry buys is
+  that everything from 1.11 up is built against TreeAMR's `main`, which
+  runs ahead of the released 0.1.0. Keep it. The Julia floor moved to
+  1.10 with the registration, and 1.10 predates `[sources]`, ignores it
+  *silently*, and takes the registered version — which is why the 1.10
+  entry of the CI matrix is the only job that builds against a released
+  TreeAMR. If that job alone fails, the answer is a TreeAMR release, not
+  a change here. To check a change end-to-end the way CI will see it, on
+  both sides of that line:
   `git archive HEAD | tar -x -C /tmp/clean && julia --project=/tmp/clean -e 'using Pkg; Pkg.test()'`
+  and the same with `julia +1.10`.
 - **The pulse's `∂ₜu` sign is load-bearing.** `u = G(x - t)` gives
   `∂ₜu = -G'`. The wrong sign does not reverse the pulse, it splits it,
   and the failure looks like an instability rather than like bad initial
@@ -271,6 +278,9 @@ Match TreeAMR's style, since the two are read together:
 - `Manifest.toml` is gitignored (both root and `bin/`), as is `TODO.md`. This
   file is *not* — `CLAUDE.md` is committed, so an edit to it lands in the diff
   and belongs in the commit message like any other change.
+- **`bin/Project.toml` still needs Julia 1.11**, because its
+  `TreeWave = {path = ".."}` source is a real dependence on `[sources]`;
+  only the root project dropped to 1.10.
 - **`bin/` has its own Manifest**, so `Pkg.update("TreeAMR")` in the root does
   not touch it. After a TreeAMR change, update both or the viewer fails with a
   `MethodError` on an API the tests are already using.
