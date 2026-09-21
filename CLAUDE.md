@@ -47,10 +47,9 @@ reuse it:
 
 ```bash
 julia --project=/tmp/twgpu -e 'using Pkg; Pkg.develop(path=".")
-    Pkg.add(name="TreeAMR", rev="main")
     Pkg.add(["Metal", "KernelAbstractions", "MultiFloats",
              "OrdinaryDiffEqLowOrderRK", "SciMLBase", "SpecialFunctions",
-             "Test"])'
+             "TreeAMR", "Test"])'
 TREEWAVE_TEST_BACKEND=metal julia --project=/tmp/twgpu test/runtests.jl
 julia --project=/tmp/twgpu bin/benchmark.jl --backend=metal --type=f32
 ```
@@ -80,30 +79,39 @@ nearly all of it compiling the two firing kernels.
 
 ## Things that have bitten before
 
-- **TreeAMR is pinned to a GitHub branch, not to the local checkout.** A
-  `~/src/jl/TreeAMR` working copy is *not* what is being tested. If a
-  TreeAMR change is needed, say so rather than editing that checkout and
-  assuming the tests see it. Note the remote has no `master` branch — only
-  `main` and `gh-pages`.
-- **The pin is `rev = "main"`, in both `Project.toml` and
-  `bin/Project.toml`.** There are two of them, and a change that updates
-  only the first leaves `julia --project=bin bin/visualize.jl` resolving
-  a branch that may no longer exist — grep for `rev =` rather than
-  editing from memory. It was `rev = "m8"` while M8 was unmerged (M8 is
-  what moved `G` onto the field set, added centerings, and changed
-  `GhostSchedule` and `regrid!`); upstream's `main` has M8 from
-  2026-09-16, and both pins moved back with it.
-- **`[sources]` no longer makes a clean checkout resolve — it pins to a
-  branch.** TreeAMR is in the General registry as of 2026-09-21, so
-  `Pkg.instantiate()` works without the entry; what the entry buys is
-  that everything from 1.11 up is built against TreeAMR's `main`, which
-  runs ahead of the released 0.1.0. Keep it. The Julia floor moved to
-  1.10 with the registration, and 1.10 predates `[sources]`, ignores it
-  *silently*, and takes the registered version — which is why the 1.10
-  entry of the CI matrix is the only job that builds against a released
-  TreeAMR. If that job alone fails, the answer is a TreeAMR release, not
-  a change here. To check a change end-to-end the way CI will see it, on
-  both sides of that line:
+- **TreeAMR comes from the General registry, not from the local
+  checkout.** A `~/src/jl/TreeAMR` working copy is *not* what is being
+  tested, and neither is upstream `main` any more. If a TreeAMR change is
+  needed, say so — the route is a TreeAMR release, not an edit to that
+  checkout and not a branch pin here. Note the remote has no `master`
+  branch — only `main` and `gh-pages`.
+- **There is exactly one TreeAMR version in the repository, and it is
+  `[compat]` in `Project.toml`.** It was two `rev = "main"` pins under
+  `[sources]`, one here and one in `bin/Project.toml`, and the standing
+  hazard was updating the first and leaving the viewer resolving a branch
+  that no longer existed. Both are gone: `bin/` declares TreeAMR as an
+  ordinary dependency with no bound of its own and inherits this one
+  through its `TreeWave = {path = ".."}` source. The bound is a *floor*
+  over the `0.1` series — `"0.1.0"` admits every `0.1.x`, so a new
+  TreeAMR patch arrives on the next resolve with nothing to edit, and
+  the bound is raised only when this package comes to need something a
+  newer release added. If you do raise it, raise it here and nowhere
+  else; grep for `TreeAMR` to confirm nothing else names a version.
+- **Deleting a `[sources]` entry does not un-track the branch —
+  `Pkg.resolve()` says "no packages added or removed" and leaves
+  `repo-rev = "main"` sitting in the manifest.** Both manifests are
+  untracked, so CI resolves from scratch and never saw this; a working
+  copy keeps building against the branch until someone runs
+  `Pkg.free("TreeAMR")` in the root *and* in `bin/`, which is the quiet
+  way to measure a TreeAMR that is not the one CI measures. A freed
+  entry says `registries = "General"` and carries no `repo-rev`; check
+  for that rather than for the absence of an error.
+- **The floor is Julia 1.10 and no longer has anything to do with
+  `[sources]`.** It was 1.11 because TreeAMR was unregistered and
+  `Project.toml` had to locate it with a `[sources]` entry, which is a
+  1.11 key; TreeAMR was registered on 2026-09-21 and 0.1.1 released the
+  same day, the entry went, and the floor is now just the LTS. To check a
+  change end-to-end the way CI will see it, at both ends of the matrix:
   `git archive HEAD | tar -x -C /tmp/clean && julia --project=/tmp/clean -e 'using Pkg; Pkg.test()'`
   and the same with `julia +1.10`.
 - **The pulse's `∂ₜu` sign is load-bearing.** `u = G(x - t)` gives
@@ -279,8 +287,10 @@ Match TreeAMR's style, since the two are read together:
   file is *not* — `CLAUDE.md` is committed, so an edit to it lands in the diff
   and belongs in the commit message like any other change.
 - **`bin/Project.toml` still needs Julia 1.11**, because its
-  `TreeWave = {path = ".."}` source is a real dependence on `[sources]`;
-  only the root project dropped to 1.10.
+  `TreeWave = {path = ".."}` source is a real dependence on `[sources]`
+  and is the one that cannot go away; only the root project dropped to
+  1.10. The viewer CI job runs on `"1"`, so this is invisible until
+  someone tries the viewer on the LTS.
 - **`bin/` has its own Manifest**, so `Pkg.update("TreeAMR")` in the root does
   not touch it. After a TreeAMR change, update both or the viewer fails with a
   `MethodError` on an API the tests are already using.

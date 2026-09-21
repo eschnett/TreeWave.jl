@@ -17,13 +17,3 @@ SciMLBase = "3.50.1"
 SpecialFunctions = "2"
 TreeAMR = "0.1.0"
 julia = "1.10"
-
-# TreeAMR is in the General registry now, so a clean clone resolves
-# without this entry and it is no longer what makes CI possible. It stays
-# because the package is developed against TreeAMR's `main`, which runs
-# ahead of the release. Julia 1.10 predates `[sources]` and ignores it,
-# taking the registered version instead -- that is deliberate, and it is
-# what the 1.10 entry of the CI matrix measures: the one job that builds
-# this package against a *released* TreeAMR.
-[sources]
-TreeAMR = {url = "https://github.com/eschnett/TreeAMR.jl", rev = "main"}

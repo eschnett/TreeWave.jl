@@ -18,12 +18,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Julia 1.10 is the floor. It is also the one job that tests
-        # against a *released* TreeAMR: `Project.toml` pins TreeAMR to
-        # `main` through a `[sources]` entry, and 1.10 predates that key
-        # and silently ignores it, resolving the registered version from
-        # General instead. So a TreeAMR change this package needs before
-        # it is released shows up here, and the fix is a TreeAMR release.
+        # Julia 1.10 is the floor, which is the LTS. It was 1.11 while
+        # TreeAMR was unregistered and `Project.toml` had to locate it
+        # with a `[sources]` entry -- a 1.11 key. TreeAMR is registered
+        # now, the entry is gone, and nothing here needs 1.11 any more.
         version: ["1.10", "1"]
         os: [ubuntu-latest, macOS-latest]
         include:

@@ -1,12 +1,13 @@
 # The viewer has its own environment so that CairoMakie -- a heavy
 # dependency that nothing in `src/` needs -- never becomes a dependency of
-# the package. The `TreeWave` entry below is what makes
+# the package. The `TreeWave` source below is what makes
 # `julia --project=bin bin/visualize.jl` work from a fresh checkout with
 # no manual `Pkg.develop`, and it is why this environment still needs
-# Julia 1.11 even though the root project now resolves on 1.10. The
-# `TreeAMR` entry buys no resolution any more -- TreeAMR is registered --
-# and is kept so that the viewer is developed against the same `main` as
-# the tests.
+# Julia 1.11 even though the root project now resolves on 1.10. TreeAMR
+# needs no source of its own: it is registered, and the version this
+# environment gets is decided by the root project's `[compat]` reached
+# through the `TreeWave` source -- so there is one bound, in one file,
+# and not two to keep in step.
 
 [deps]
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
@@ -16,5 +17,4 @@ TreeAMR = "91bc416d-811c-44c1-9bc4-b9c8bbdbbd08"
 TreeWave = "6acacbb1-3a21-4f63-beb8-8f5fda648e50"
 
 [sources]
-TreeAMR = {url = "https://github.com/eschnett/TreeAMR.jl", rev = "main"}
 TreeWave = {path = ".."}

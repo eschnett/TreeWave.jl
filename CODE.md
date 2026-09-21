@@ -1416,27 +1416,41 @@ cannot check is that a device run *works* — for that, add a device
 package to an environment of your own and set `TREEWAVE_TEST_BACKEND`;
 see [Running on a device](#running-on-a-device).
 
-Julia 1.10 is the floor. It was 1.11 while TreeAMR was unregistered: a
-clean checkout could not resolve at all without the `[sources]` entry that
-locates TreeAMR — `Manifest.toml` is not tracked, and `Project.toml` alone
-carries only a UUID — and `[sources]` is a 1.11 key, which is also why CI
-was impossible before it. TreeAMR is registered now, so that argument has
-expired and the floor drops to the LTS.
+Julia 1.10 is the floor, which is the LTS and nothing more interesting
+than that. It was 1.11 while TreeAMR was unregistered: a clean checkout
+could not resolve at all without a `[sources]` entry to locate TreeAMR —
+`Manifest.toml` is not tracked, and `Project.toml` alone carries only a
+UUID — and `[sources]` is a 1.11 key, which is also why CI was impossible
+before it. TreeAMR is registered now, the entry is gone, and with it the
+reason for the higher floor.
 
-The `[sources]` entry stays anyway, because this package is developed
-against TreeAMR's `main`, which runs ahead of the release. That gives the
-1.10 job a second use beyond the floor: 1.10 does not know the key, ignores
-it *silently*, and resolves the registered TreeAMR instead — so it is the
-one job in the matrix that builds against a released TreeAMR rather than
-against a branch. A TreeAMR change this package starts to need before it is
-released fails there and nowhere else, and the fix is a TreeAMR release.
+What replaces the entry is an ordinary `[compat]` bound, `TreeAMR =
+"0.1.0"` — a floor over the whole `0.1` series, not a pin to one release.
+A resolve takes the newest registered `0.1.x`, and the bound is raised
+only when this package comes to need something a newer one added.
+
+That is still a moving target, and deliberately so; what changed is the
+size of the step. Development against a branch meant the mesh could move
+under the physics between two runs of the same commit, so the numbers in
+[Measured results](#measured-results) were reproducible only for as long
+as `main` stood still. Now it moves by releases, which are announced,
+ordered and nameable in a bug report. The cost is that a TreeAMR change
+this package needs has to be released before it can be used here — which
+is the intended direction, TreeAMR being the library and this its sample
+application.
+
+One bound, in one file: `bin/` declares TreeAMR as an ordinary dependency
+with no bound of its own, and inherits this one through the `TreeWave`
+path source it already needs. Before, the version lived in two
+`[sources]` entries that had to be changed together.
 
 Visualization lives in `bin/` and not in the package because CairoMakie is
 a heavy dependency that nothing in `src/` needs. `bin/` carries its own
 `Project.toml` with a `[sources]` entry pointing at the package root, so
 `julia --project=bin bin/visualize.jl` works from a fresh checkout. That
-path entry is a real dependence on `[sources]`, so the viewer environment
-still needs 1.11 even though the package itself no longer does.
+path entry is the one real dependence on `[sources]` left, so the viewer
+environment still needs 1.11 even though the package itself no longer
+does; the viewer CI job runs on release, so nothing notices.
 
 ## Measured results
 
