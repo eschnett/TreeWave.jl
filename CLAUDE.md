@@ -106,14 +106,15 @@ nearly all of it compiling the two firing kernels.
   way to measure a TreeAMR that is not the one CI measures. A freed
   entry says `registries = "General"` and carries no `repo-rev`; check
   for that rather than for the absence of an error.
-- **The floor is Julia 1.10 and no longer has anything to do with
-  `[sources]`.** It was 1.11 because TreeAMR was unregistered and
-  `Project.toml` had to locate it with a `[sources]` entry, which is a
-  1.11 key; TreeAMR was registered on 2026-09-21 and 0.1.1 released the
-  same day, the entry went, and the floor is now just the LTS. To check a
+- **The floor is Julia 1.11, so that `[sources]` is available.** It
+  was 1.11 first because TreeAMR was unregistered and `Project.toml` had
+  to locate it with a `[sources]` entry, a 1.11 key; when TreeAMR was
+  registered (2026-09-21, 0.1.1) the entry went and the floor dropped to
+  the LTS, 1.10. On 2026-09-25 it went back to 1.11 across all the Tree*
+  packages, to simplify depending on unregistered packages. To check a
   change end-to-end the way CI will see it, at both ends of the matrix:
   `git archive HEAD | tar -x -C /tmp/clean && julia --project=/tmp/clean -e 'using Pkg; Pkg.test()'`
-  and the same with `julia +1.10`.
+  and the same with `julia +1.11`.
 - **The pulse's `∂ₜu` sign is load-bearing.** `u = G(x - t)` gives
   `∂ₜu = -G'`. The wrong sign does not reverse the pulse, it splits it,
   and the failure looks like an instability rather than like bad initial
@@ -286,11 +287,10 @@ Match TreeAMR's style, since the two are read together:
 - `Manifest.toml` is gitignored (both root and `bin/`), as is `TODO.md`. This
   file is *not* — `CLAUDE.md` is committed, so an edit to it lands in the diff
   and belongs in the commit message like any other change.
-- **`bin/Project.toml` still needs Julia 1.11**, because its
+- **`bin/Project.toml` needs Julia 1.11**, because its
   `TreeWave = {path = ".."}` source is a real dependence on `[sources]`
-  and is the one that cannot go away; only the root project dropped to
-  1.10. The viewer CI job runs on `"1"`, so this is invisible until
-  someone tries the viewer on the LTS.
+  and is the one that cannot go away. The root project's floor is 1.11
+  too now, so the two agree.
 - **`bin/` has its own Manifest**, so `Pkg.update("TreeAMR")` in the root does
   not touch it. After a TreeAMR change, update both or the viewer fails with a
   `MethodError` on an API the tests are already using.

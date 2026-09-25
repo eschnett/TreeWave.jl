@@ -18,11 +18,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Julia 1.10 is the floor, which is the LTS. It was 1.11 while
-        # TreeAMR was unregistered and `Project.toml` had to locate it
-        # with a `[sources]` entry -- a 1.11 key. TreeAMR is registered
-        # now, the entry is gone, and nothing here needs 1.11 any more.
-        version: ["1.10", "1"]
+        # Julia 1.11 is the floor, so that unregistered dependencies can
+        # be located with `[sources]` entries -- a 1.11 key. It was 1.10
+        # (the LTS) for a while after TreeAMR was registered, and went
+        # back to 1.11 on 2026-09-25 with all the Tree* packages.
+        version: ["1.11", "1"]
         os: [ubuntu-latest, macOS-latest]
         include:
           - version: "1"

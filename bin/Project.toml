@@ -2,8 +2,8 @@
 # dependency that nothing in `src/` needs -- never becomes a dependency of
 # the package. The `TreeWave` source below is what makes
 # `julia --project=bin bin/visualize.jl` work from a fresh checkout with
-# no manual `Pkg.develop`, and it is why this environment still needs
-# Julia 1.11 even though the root project now resolves on 1.10. TreeAMR
+# no manual `Pkg.develop`, and it is why this environment needs
+# Julia 1.11, which is now the root project's floor as well. TreeAMR
 # needs no source of its own: it is registered, and the version this
 # environment gets is decided by the root project's `[compat]` reached
 # through the `TreeWave` source -- so there is one bound, in one file,

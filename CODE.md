@@ -1391,7 +1391,7 @@ The tests are ported from TreeAMR's own `test/wave_tests.jl`, minus its
 `scatter!`/`gather!` contract rather than anything about the wave
 equation, and belongs upstream where it already lives.
 
-CI runs the test suite on Julia 1.10 and release, on Linux and macOS, and
+CI runs the test suite on Julia 1.11 and release, on Linux and macOS, and
 separately renders all three figures — plus the pulse at `Float32`, whose
 conversions the default render does not exercise, and all three again
 cell-centred, which is the one comparison where something visibly moves
@@ -1416,13 +1416,15 @@ cannot check is that a device run *works* — for that, add a device
 package to an environment of your own and set `TREEWAVE_TEST_BACKEND`;
 see [Running on a device](#running-on-a-device).
 
-Julia 1.10 is the floor, which is the LTS and nothing more interesting
-than that. It was 1.11 while TreeAMR was unregistered: a clean checkout
-could not resolve at all without a `[sources]` entry to locate TreeAMR —
-`Manifest.toml` is not tracked, and `Project.toml` alone carries only a
-UUID — and `[sources]` is a 1.11 key, which is also why CI was impossible
-before it. TreeAMR is registered now, the entry is gone, and with it the
-reason for the higher floor.
+Julia 1.11 is the floor, because `[sources]` is a 1.11 key. It was 1.11
+first while TreeAMR was unregistered: a clean checkout could not resolve
+at all without a `[sources]` entry to locate TreeAMR — `Manifest.toml` is
+not tracked, and `Project.toml` alone carries only a UUID — which is also
+why CI was impossible before it. When TreeAMR was registered the entry
+went and the floor dropped to the LTS, 1.10. It was raised back to 1.11
+on 2026-09-25 across all the Tree* packages (decided), so that any of
+them can depend on an unregistered package through `[sources]` without
+touching the floor again.
 
 What replaces the entry is an ordinary `[compat]` bound, `TreeAMR =
 "0.1.0"` — a floor over the whole `0.1` series, not a pin to one release.
