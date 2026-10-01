@@ -61,7 +61,7 @@ jobs:
           JULIA_NUM_THREADS: ${{ matrix.threads || 1 }}
       - uses: julia-actions/julia-processcoverage@v1
         if: ${{ (matrix.threads || 1) == 1 }}
-      - uses: codecov/codecov-action@v5
+      - uses: codecov/codecov-action@v7
         if: ${{ (matrix.threads || 1) == 1 }}
         with:
           files: lcov.info
