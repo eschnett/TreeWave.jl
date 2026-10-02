@@ -181,17 +181,15 @@ function track_pulse(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
         worst = max(worst, volume_weighted_norm(fs, sol.u[end] .- ue; p=Inf))
 
         # How much of the pulse sits in refined blocks -- the measure of
-        # whether the refined region is actually following it. One peak
-        # per block from the mesh's own per-block reduction, so the data
-        # is never read cell by cell from the host; the verdict, which
-        # needs the tree, is the loop below.
-        peaks = block_mapreduce(abs, max, zero(T), fs; vars=1)
-        inside = zero(T)
-        total = zero(T)
-        for b in 1:nblocks(fs)
-            total = max(total, peaks[b])
-            level(blockkey(fs, b)) > 0 && (inside = max(inside, peaks[b]))
-        end
+        # whether the refined region is actually following it. Two global
+        # peaks from the mesh's own reduction, so the data is never read
+        # cell by cell from the host and the answer does not depend on how
+        # the blocks are distributed; the second sees only refined blocks
+        # through a 0/1 weight on the key, which under `max` of `|u|` is
+        # exact.
+        total = mesh_mapreduce(abs, max, zero(T), fs; vars=1)
+        inside = mesh_mapreduce(abs, max, zero(T), fs; vars=1,
+                                weight=key -> level(key) > 0)
         push!(refined_fraction, total > 0 ? inside / total : zero(T))
 
         # The indicator reads a 3-point stencil, so it needs ghosts; and

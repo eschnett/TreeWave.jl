@@ -92,11 +92,13 @@ nearly all of it compiling the two firing kernels.
   that no longer existed. Both are gone: `bin/` declares TreeAMR as an
   ordinary dependency with no bound of its own and inherits this one
   through its `TreeWave = {path = ".."}` source. The bound is a *floor*
-  over the `0.1` series — `"0.1.0"` admits every `0.1.x`, so a new
-  TreeAMR patch arrives on the next resolve with nothing to edit, and
-  the bound is raised only when this package comes to need something a
-  newer release added. If you do raise it, raise it here and nowhere
-  else; grep for `TreeAMR` to confirm nothing else names a version.
+  over the `0.1` series — `"0.1.2"` admits every `0.1.x` from 0.1.2 on,
+  so a new TreeAMR patch arrives on the next resolve with nothing to
+  edit, and the bound is raised only when this package comes to need
+  something a newer release added. It is 0.1.2 because that release
+  added `mesh_mapreduce`; it was `"0.1.0"` before. If you raise it
+  again, raise it here and nowhere else; grep for `TreeAMR` to confirm
+  nothing else names a version.
 - **Deleting a `[sources]` entry does not un-track the branch —
   `Pkg.resolve()` says "no packages added or removed" and leaves
   `repo-rev = "main"` sitting in the manifest.** Both manifests are
@@ -240,14 +242,25 @@ nearly all of it compiling the two firing kernels.
   for a GPU.** A whole `track_blast` is 7× *slower* on Metal at 52k
   cells. That is launch overhead, not a regression: measure phases at
   `--n=128 --roots=32` (29.4M cells), which is what `CODE.md` records.
-- **`block_mapreduce` is where the per-block reductions go.**
-  `field_scales`, `blast_coverage` and `track_pulse`'s tracking measure
-  all reduce field data one block at a time, and all three go through
-  TreeAMR rather than looping here — the thread-count determinism is
-  upstream's invariant and a second copy of that argument is a second
-  thing to get wrong. It was the unexported `TreeAMR.block_partials`
-  until upstream exported it; if you find prose here still saying that,
-  it is stale.
+- **A reduction that crosses blocks goes through `mesh_mapreduce`, never
+  through a `maximum` or `sum` of `block_mapreduce`.** `field_scales`,
+  `blast_coverage` and `track_pulse`'s tracking measure all reduce field
+  data over the whole mesh, and all three go through TreeAMR rather than
+  looping here — the thread-count determinism is upstream's invariant
+  and a second copy of that argument is a second thing to get wrong.
+  The two spellings agree on one process, which is why the host-side
+  combine went unnoticed until TreeAMR's M7 (0.1.5) audit: on a
+  distributed mesh `block_mapreduce` returns only this rank's blocks,
+  so `maximum` of it is a per-rank scale (a mesh that depends on the
+  rank count) and throws on a rank with no blocks. `mesh_mapreduce` is
+  where upstream does the cross-rank combine. A diagnostic that needs
+  the tree — "only refined blocks" — passes it as a 0/1 `weight` on the
+  block's key rather than indexing the per-block vector by `b`. Use an
+  integer `init` with an integer weight when counting: a `0.0` would put
+  a `Float64` accumulator in the device kernel. `block_mapreduce` stays
+  right for a value that is per block by nature. It was the unexported
+  `TreeAMR.block_partials` until upstream exported it; if you find prose
+  here still saying that, it is stale.
 - **`julia -t N` asks for `N + 1` threads.** The interactive thread is
   added on top of the count given, so with `JULIA_EXCLUSIVE=1` pinning one
   thread per core, `-t 64` on a 64-core node dies with "Too many threads

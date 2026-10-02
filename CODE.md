@@ -18,8 +18,9 @@ application.
   `TreeAMR.block_partials`, the per-block reduction every diagnostic
   upstream is built on, was unexported and ought not to have been.
   Upstream agreed, and it is now public as `block_mapreduce` — with a
-  better signature than the one this package was reaching for. See
-  [Running on a device](#running-on-a-device).
+  better signature than the one this package was reaching for — and its
+  whole-mesh form `mesh_mapreduce` is what the diagnostics here now
+  call. See [Running on a device](#running-on-a-device).
 - Be small enough to read in one sitting.
 - Run in the caller's floating-point type, not only `Float64` — TreeAMR's
   mesh is generic and an application that is not would give the genericity
@@ -803,7 +804,8 @@ Two of the four have since gone back upstream. `field_scales` and
 `blast_coverage` were per-block reductions over field data, which is
 exactly what `TreeAMR.block_mapreduce` is, and a per-block reduction over
 field data is the one shape that has to change on a device. They now call
-it and the discipline above is upstream's to keep; the two that remain
+its whole-mesh form, `mesh_mapreduce`, and the discipline above is
+upstream's to keep; the two that remain
 here are the Hankel table and its contraction, which are host `Float64`
 tables and not field data at all. See
 [Running on a device](#running-on-a-device).
@@ -1030,13 +1032,29 @@ centerings.
 
 **Three diagnostics were per-block reductions over field data.**
 `field_scales`, [`blast_coverage`](src/blast.jl) and `track_pulse`'s
-tracking measure go through `block_mapreduce` — threaded host views on
-the CPU, one kernel work item per block otherwise, per-block values
-combined in block order either way. They call it rather than reimplement
-it because a second copy of a determinism argument is a second thing to
-get wrong. What stayed here is the part that needs the *tree* — which
-blocks are refined, which are at the finest level — reducing one number
-per block.
+tracking measure go through `mesh_mapreduce` — `block_mapreduce`'s
+threaded host views on the CPU, one kernel work item per block otherwise,
+then the per-block values combined in block order either way. They call
+it rather than reimplement it because a second copy of a determinism
+argument is a second thing to get wrong.
+
+They called `block_mapreduce` and combined its per-block vector here
+until TreeAMR 0.1.5, and the part that needed the *tree* — which blocks
+are refined, which are at the finest level — indexed that vector by
+block. On one process that is the same answer. TreeAMR's M7 (0.1.5,
+distributed meshes) audited the downstreams and found that it would not
+stay so: `block_mapreduce` returns only the calling rank's blocks, so a
+`maximum` of it is a per-rank Löhner scale — the mesh would depend on the
+rank count, and a rank with no blocks would throw — and the two coverage
+measures would be rank-local. `mesh_mapreduce` is where upstream does the
+cross-rank combine, so the three now reach it, and the tree enters as a
+0/1 `weight` on each block's key: `level(key) > 0` for the pulse's
+refined peak, `level(key) == maxlevel(forest)` for the blast's fine
+count. Every one is exact — a `max`, or a sum of integers — so the
+numbers did not move, and `test/threading_tests.jl` still asserts them
+against the serial loops bit for bit. The cost is a third pass in
+`blast_coverage` (the fine count used to reuse the hot count's per-block
+vector), which runs once per regrid.
 
 That name was `TreeAMR.block_partials` when this was written, and using
 it was the one documented exception to the "public API only" rule, with a
@@ -1184,6 +1202,20 @@ Cell-centred, the same machine in the same sweep:
 | `blast_coverage` | 0.0676 | 0.0153 | 0.0154 |
 
 Seconds; the minimum of several, each synchronized.
+
+The `blast_coverage` rows in these tables, and in the H200 and
+thread-scaling tables below, are the two-pass form it had before it moved
+to `mesh_mapreduce` (see [What an application has to do that the mesh
+does not](#what-an-application-has-to-do-that-the-mesh-does-not)). The
+third pass was measured on its own rather than by re-running the sweeps,
+old and new side by side in one process on the same machine, at
+`Float64` on the CPU and on the same 29.4M-point mesh against TreeAMR
+0.1.5: 0.098 → 0.117 s at one thread (1.19×) and 0.0236 → 0.0317 s at
+eight (1.34×), with identical results. `field_scales` changed only in
+how the per-block maxima are combined, and its time did not move
+(0.091 → 0.075 s and 0.019 → 0.018, within the spread). Ratios, not
+seconds, are what to carry over into the tables: the absolute numbers
+come from a different sweep.
 
 **The centering costs a few per cent on the RHS and nothing anywhere
 else.** A vertex-like dimension stores one plane more — 133 against 132
@@ -1427,9 +1459,11 @@ them can depend on an unregistered package through `[sources]` without
 touching the floor again.
 
 What replaces the entry is an ordinary `[compat]` bound, `TreeAMR =
-"0.1.0"` — a floor over the whole `0.1` series, not a pin to one release.
+"0.1.2"` — a floor over the `0.1` series, not a pin to one release.
 A resolve takes the newest registered `0.1.x`, and the bound is raised
-only when this package comes to need something a newer one added.
+only when this package comes to need something a newer one added. It
+was `"0.1.0"` until the diagnostics moved to `mesh_mapreduce`, which
+0.1.2 added.
 
 That is still a moving target, and deliberately so; what changed is the
 size of the step. Development against a branch meant the mesh could move
@@ -1450,9 +1484,9 @@ Visualization lives in `bin/` and not in the package because CairoMakie is
 a heavy dependency that nothing in `src/` needs. `bin/` carries its own
 `Project.toml` with a `[sources]` entry pointing at the package root, so
 `julia --project=bin bin/visualize.jl` works from a fresh checkout. That
-path entry is the one real dependence on `[sources]` left, so the viewer
-environment still needs 1.11 even though the package itself no longer
-does; the viewer CI job runs on release, so nothing notices.
+path entry is the one real dependence on `[sources]` left, and it is
+why the viewer environment needs 1.11 — the same floor as the package
+itself.
 
 ## Measured results
 
