@@ -274,24 +274,27 @@ A fraction of *cells*, so it is `Float64` at every precision rather than the
 run's own type — see the rule under "Precision" in `CODE.md`.
 """
 function blast_coverage(fs::FieldSet{T}) where {T}
-    # Two per-block reduction passes, both through the mesh's own
-    # `block_mapreduce`, so neither reads a cell from the host and both are
-    # bit-identical whatever the thread count -- see `field_scales`. The
-    # second cannot start until the first has finished: it needs the peak.
-    peaks = block_mapreduce(abs, max, zero(T), fs; vars=1)
-    peak = maximum(peaks)
-    finest = maximum(b -> level(blockkey(fs, b)), 1:nblocks(fs))
+    # Three reductions over the whole mesh, all through TreeAMR's
+    # `mesh_mapreduce`, so none reads a cell from the host and every one
+    # is global: combining per-block values here would give each rank of a
+    # distributed mesh its own peak and its own counts. The two counts
+    # cannot start until the peak is known.
+    peak = mesh_mapreduce(abs, max, zero(T), fs; vars=1)
+    finest = maxlevel(fs.forest)
 
-    # Counts per block, summed afterwards: integers, so the total is exact
-    # under any order.
+    # Integer counts, so the totals are exact under any order. The fine
+    # count selects its blocks with a 0/1 weight on the block's key, which
+    # is how the reduction is told about the tree. TreeAMR's docstring asks
+    # for a floating-point `init` with a weight, because a weight is
+    # usually a volume; this one is an integer, `oftype(0, 1)` is exact,
+    # and a `0.0` would put a `Float64` accumulator in the device kernel,
+    # which Metal cannot run.
     half = peak / 2
-    hot = block_mapreduce(x -> abs(x) > half, +, 0, fs; vars=1)
-    total = sum(hot)
+    hot(x) = abs(x) > half
+    total = mesh_mapreduce(hot, +, 0, fs; vars=1)
     total == 0 && return 1.0
-    # Which blocks are the fine ones needs the tree, so that part stays
-    # here; what it reduces is one integer per block.
-    isfine(b) = level(blockkey(fs, b)) == finest
-    fine = sum(hot[b] for b in 1:nblocks(fs) if isfine(b); init=0)
+    fine = mesh_mapreduce(hot, +, 0, fs; vars=1,
+                          weight=key -> Int(level(key) == finest))
     return fine / total
 end
 

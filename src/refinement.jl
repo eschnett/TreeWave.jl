@@ -84,6 +84,12 @@ block-indexed array, so the answer is bit-identical whatever the thread
 count — the property TreeAMR's M5 holds itself to, and which stops at the
 first application loop that does not.
 
+A *global* maximum, through TreeAMR's `mesh_mapreduce` rather than a
+`maximum` of `block_mapreduce`'s per-block values. The two agree on one
+process; on a distributed mesh the second would be each rank's own
+maximum, so the floor — and with it the mesh — would depend on the rank
+count, and a rank holding no blocks would throw.
+
 !!! warning "Not from inside a flag callback"
     TreeAMR calls `flag_blocks`' callback concurrently, so this must be
     evaluated *before* the flagging pass, never inside it. It is:
@@ -109,7 +115,7 @@ function field_scales(fs::FieldSet{T}; vars=1:fs.nvars) where {T}
     # device reduction is a kernel launch and a launch takes a single
     # variable range, and two launches once per regrid cost nothing
     # against the sweep that follows.
-    return [maximum(block_mapreduce(abs, max, zero(R), fs; vars=v)) for v in vars]
+    return [mesh_mapreduce(abs, max, zero(R), fs; vars=v) for v in vars]
 end
 
 """
