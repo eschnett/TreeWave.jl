@@ -50,6 +50,46 @@ floorint(x) = _toint(floor(x))
 # `y` is an exact integer value by construction, so both branches are exact.
 _toint(y::Base.IEEEFloat) = Int(y)
 _toint(y) = Int(BigFloat(y))
+roundint(x) = _toint(round(x))
+
+"""
+    chunk_count(t_end, chunk)
+
+The number of chunks to `t_end`: `⌈t_end / chunk⌉`, except that a quotient
+within a few ulp of an integer `m` gives `m`, so that a run meant to be a
+whole number of chunks is not given one more by rounding. The tolerance is
+the rounding a quotient of two values of type `T` can carry — a few ulp of
+the quotient, plus a few ulp of `t_end` in units of `chunk` — so it never
+absorbs a genuine remainder. TreeHydro's rule (its step 12), which is
+IMEXRungeKutta's `step_count` applied to the regrid cadence.
+
+Without it `ceilint(t_end / chunk)` overcounts whenever the quotient rounds
+just above an integer: `0.33 / 0.03 == 11.000000000000002` at `Float64`
+gives a twelfth chunk from `11 · 0.03 == 0.32999999999999996` to `0.33`, a
+sliver with a solve and a regrid of its own; at `Float32`, `0.15f0 / 0.005f0`
+is `30.000002f0`. Pair it with [`chunk_bounds`](@ref), whose last chunk ends
+at `t_end` exactly.
+"""
+function chunk_count(t_end::T, chunk::T) where {T}
+    r = t_end / chunk
+    m = round(r)
+    tol = 4 * (eps(r) + eps(t_end) / chunk)
+    return m >= 1 && abs(r - m) <= tol ? roundint(m) : ceilint(r)
+end
+
+"""
+    chunk_bounds(c, nchunks, t_end, chunk) -> (tstart, t)
+
+The span of chunk `c` of [`chunk_count`](@ref)`(t_end, chunk) == nchunks`:
+from `(c − 1) · chunk` to `c · chunk`, both capped at `t_end`, and the last
+one ending at `t_end` exactly — `nchunks · chunk` can round an ulp below it
+(`40 · 0.005f0 == 0.19999999f0`).
+"""
+function chunk_bounds(c::Integer, nchunks::Integer, t_end::T, chunk::T) where {T}
+    tstart = min((c - 1) * chunk, t_end)
+    t = c == nchunks ? t_end : min(c * chunk, t_end)
+    return tstart, t
+end
 
 """
     tofloat64(x)

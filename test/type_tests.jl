@@ -64,6 +64,26 @@ shortpulse(T) = (; roots=8, N=8, G=1, σ=T(2//25), t_end=T(1//10), ops=TYPEOPS)
     @test TreeWave.ceilint(T(2)) === 2                 # already integral
     @test TreeWave.tofloat64(T(1//2)) === 0.5
 
+    # The chunk count of a run meant to be a whole number of chunks, where
+    # the quotient rounds just above or below the integer: `0.33/0.03` is
+    # `11.000000000000002` at Float64 and `0.15f0/0.005f0` is `30.000002f0`.
+    # `ceilint` gave one chunk more, a sliver ending at `t_end`.
+    @test TreeWave.chunk_count(T(33//100), T(3//100)) == 11
+    @test TreeWave.chunk_count(T(7//100), T(1//100)) == 7
+    @test TreeWave.chunk_count(T(3//20), T(1//200)) == 30
+    @test TreeWave.chunk_count(T(1//5), T(1//200)) == 40
+    @test TreeWave.chunk_count(T(1//5), T(1//5)) == 1
+    # A genuine remainder still gets a short last chunk.
+    @test TreeWave.chunk_count(T(1//5), T(3//40)) == 3
+    @test TreeWave.chunk_count(T(1//10), T(1//3)) == 1
+    # And the last chunk ends at `t_end` itself, whatever `nchunks · chunk` is.
+    for (te, ch, n) in ((T(1//5), T(1//200), 40), (T(33//100), T(3//100), 11))
+        @test TreeWave.chunk_count(te, ch) == n
+        @test TreeWave.chunk_bounds(n, n, te, ch)[2] === te
+        @test all(c -> TreeWave.chunk_bounds(c, n, te, ch)[2] >
+                       TreeWave.chunk_bounds(c, n, te, ch)[1], 1:n)
+    end
+
     # And `wrap` really is `mod` where `mod` exists, which is what lets the
     # Float64 numbers in CODE.md stay put.
     T <: Base.IEEEFloat && @test TreeWave.wrap(T(9//4), one(T)) === mod(T(9//4), one(T))

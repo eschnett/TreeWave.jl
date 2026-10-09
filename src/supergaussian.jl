@@ -155,10 +155,9 @@ function track_pulse(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
     # `1e-12` is far below one ulp of `t`, so the guard degenerated into
     # `t < t_end` and the final chunk's fate turned on rounding. The chunk
     # index is exact in every type.
-    nchunks = ceilint(t_end / chunk)
+    nchunks = chunk_count(t_end, chunk)
     for c in 1:nchunks
-        tstart = min((c - 1) * chunk, t_end)
-        t = min(c * chunk, t_end)
+        tstart, t = chunk_bounds(c, nchunks, t_end, chunk)
         t > tstart || break
         problem = WaveProblem(fs, schedule)
         u = statevector(fs)
