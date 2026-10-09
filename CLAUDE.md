@@ -91,14 +91,15 @@ nearly all of it compiling the two firing kernels.
   hazard was updating the first and leaving the viewer resolving a branch
   that no longer existed. Both are gone: `bin/` declares TreeAMR as an
   ordinary dependency with no bound of its own and inherits this one
-  through its `TreeWave = {path = ".."}` source. The bound is a *floor*
-  over the `0.1` series — `"0.1.2"` admits every `0.1.x` from 0.1.2 on,
-  so a new TreeAMR patch arrives on the next resolve with nothing to
-  edit, and the bound is raised only when this package comes to need
-  something a newer release added. It is 0.1.2 because that release
-  added `mesh_mapreduce`; it was `"0.1.0"` before. If you raise it
-  again, raise it here and nowhere else; grep for `TreeAMR` to confirm
-  nothing else names a version.
+  through its `TreeWave = {path = ".."}` source. The bound is the
+  `0.2` series — `"0.2"` admits every `0.2.x`, so a new TreeAMR patch
+  arrives on the next resolve with nothing to edit, and the bound is
+  raised only when this package comes to need something a newer release
+  added or when TreeAMR breaks its API in a new minor series. It was
+  `"0.1.2"` (for `mesh_mapreduce`) until TreeAMR 0.2.0, whose only break
+  moved the checkpoints out into TreeIOHDF5, which this package does not
+  use. If you raise it again, raise it here and nowhere else; grep for
+  `TreeAMR` to confirm nothing else names a version.
 - **Deleting a `[sources]` entry does not un-track the branch —
   `Pkg.resolve()` says "no packages added or removed" and leaves
   `repo-rev = "main"` sitting in the manifest.** Both manifests are
