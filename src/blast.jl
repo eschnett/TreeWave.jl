@@ -400,10 +400,9 @@ function track_blast(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
     covered = 1.0
     # Counted rather than accumulated; see the same loop in `track_pulse` for
     # why an absolute `1e-12` slack cannot survive a change of precision.
-    nchunks = ceilint(t_end / chunk)
+    nchunks = chunk_count(t_end, chunk)
     for c in 1:nchunks
-        tstart = min((c - 1) * chunk, t_end)
-        t = min(c * chunk, t_end)
+        tstart, t = chunk_bounds(c, nchunks, t_end, chunk)
         t > tstart || break
         problem = WaveProblem(fs, schedule)
         u = statevector(fs)
