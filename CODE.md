@@ -1459,11 +1459,14 @@ them can depend on an unregistered package through `[sources]` without
 touching the floor again.
 
 What replaces the entry is an ordinary `[compat]` bound, `TreeAMR =
-"0.1.2"` — a floor over the `0.1` series, not a pin to one release.
-A resolve takes the newest registered `0.1.x`, and the bound is raised
-only when this package comes to need something a newer one added. It
-was `"0.1.0"` until the diagnostics moved to `mesh_mapreduce`, which
-0.1.2 added.
+"0.2"` — the whole `0.2` series, not a pin to one release. A resolve
+takes the newest registered `0.2.x`, and the bound is raised only when
+this package comes to need something a newer one added, or when TreeAMR
+breaks its API in a new minor series. It was `"0.1.0"` until the
+diagnostics moved to `mesh_mapreduce`, which 0.1.2 added, and `"0.1.2"`
+until TreeAMR 0.2.0, whose only break moved the checkpoint functions
+out into the companion package TreeIOHDF5; nothing here writes
+checkpoints, so the change was the bound alone.
 
 That is still a moving target, and deliberately so; what changed is the
 size of the step. Development against a branch meant the mesh could move
