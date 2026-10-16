@@ -1423,7 +1423,7 @@ The tests are ported from TreeAMR's own `test/wave_tests.jl`, minus its
 `scatter!`/`gather!` contract rather than anything about the wave
 equation, and belongs upstream where it already lives.
 
-CI runs the test suite on Julia 1.11 and release, on Linux and macOS, and
+CI runs the test suite on Julia 1.13, on Linux and macOS, and
 separately renders all three figures — plus the pulse at `Float32`, whose
 conversions the default render does not exercise, and all three again
 cell-centred, which is the one comparison where something visibly moves
@@ -1448,15 +1448,21 @@ cannot check is that a device run *works* — for that, add a device
 package to an environment of your own and set `TREEWAVE_TEST_BACKEND`;
 see [Running on a device](#running-on-a-device).
 
-Julia 1.11 is the floor, because `[sources]` is a 1.11 key. It was 1.11
-first while TreeAMR was unregistered: a clean checkout could not resolve
-at all without a `[sources]` entry to locate TreeAMR — `Manifest.toml` is
-not tracked, and `Project.toml` alone carries only a UUID — which is also
-why CI was impossible before it. When TreeAMR was registered the entry
-went and the floor dropped to the LTS, 1.10. It was raised back to 1.11
-on 2026-09-25 across all the Tree* packages (decided), so that any of
-them can depend on an unregistered package through `[sources]` without
-touching the floor again.
+Julia 1.13 is the floor, and the only version CI tests. Erik raised it
+from 1.11 on 2026-10-16 across all the Tree* packages: supporting the
+older versions slowed development and was not useful at the moment.
+Nothing in the code was specific to 1.11; the raise removed the second
+end of the CI matrix, and moved `bin/benchmark.sbatch` from the cluster's
+`julia/1.11.2` module to juliaup's 1.13. Before that, the floor followed
+`[sources]`, a 1.11 key. It was 1.11 first while TreeAMR was
+unregistered: a clean checkout could not resolve at all without a
+`[sources]` entry to locate TreeAMR — `Manifest.toml` is not tracked, and
+`Project.toml` alone carries only a UUID — which is also why CI was
+impossible before it. When TreeAMR was registered the entry went and the
+floor dropped to the LTS, 1.10, and it went back to 1.11 on 2026-09-25
+across all the Tree* packages, so that any of them could depend on an
+unregistered package through `[sources]` without touching the floor
+again; 1.13 keeps that.
 
 What replaces the entry is an ordinary `[compat]` bound, `TreeAMR =
 "0.2"` — the whole `0.2` series, not a pin to one release. A resolve
@@ -1488,8 +1494,8 @@ a heavy dependency that nothing in `src/` needs. `bin/` carries its own
 `Project.toml` with a `[sources]` entry pointing at the package root, so
 `julia --project=bin bin/visualize.jl` works from a fresh checkout. That
 path entry is the one real dependence on `[sources]` left, and it is
-why the viewer environment needs 1.11 — the same floor as the package
-itself.
+why the viewer environment needs at least 1.11, which the package's
+floor of 1.13 more than covers.
 
 ## Measured results
 

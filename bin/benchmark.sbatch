@@ -27,8 +27,7 @@
 # job's own wall clock when skipped. One interactive allocation, once:
 #
 #     srun -p amddebugq -c 64 --pty bash -lc \
-#         "module load julia/1.11.2 && \
-#          julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'"
+#         "julia +1.13 --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'"
 #
 # Do not submit both placements before that has finished: two jobs
 # precompiling the same depot at once serialize on its lock files.
@@ -56,17 +55,20 @@ export OPENBLAS_NUM_THREADS=1
 
 launch=(julia)
 if [ -n "${SLURM_JOB_ID:-}" ]; then
-    [ -n "${MODULESHOME:-}" ] || source /etc/profile.d/modules.sh
-    module load julia/1.11.2
+    # The package needs Julia 1.13, which comes from juliaup rather than
+    # the cluster's `julia/1.11.2` module; a batch shell need not have
+    # juliaup on PATH.
+    export PATH="$HOME/.juliaup/bin:$PATH"
     # SLURM's own affinity is switched off, and the threads are then left
-    # to the OS. `JULIA_EXCLUSIVE=1` would pin them one per core, but
-    # cannot be used for the whole sweep: Julia adds an interactive thread
-    # on top of `-t N`, so at the full core count it asks for one more
-    # thread than there are cores and exits -- and `-t N,0`, which would
-    # be the fix, is rejected by 1.11 ("n and m must be integers >= 1").
-    # A sweep whose last point runs under different conditions than the
-    # rest is worse than an unpinned one.
-    launch=(srun --cpu-bind=none julia)
+    # to the OS. `JULIA_EXCLUSIVE=1` would pin them one per core, but not
+    # with a bare `-t N`: Julia adds an interactive thread on top of it,
+    # so at the full core count it asks for one more thread than there
+    # are cores and exits, and a sweep whose last point runs under
+    # different conditions than the rest is worse than an unpinned one.
+    # `-t N,0` would be the fix; it was rejected by Julia 1.11, the
+    # cluster's version when the table in CODE.md was taken unpinned.
+    # Pinning now would mean measuring that table again. (open)
+    launch=(srun --cpu-bind=none julia +1.13)
 fi
 
 # Page placement is the single biggest effect on a NUMA node, and it is

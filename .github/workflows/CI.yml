@@ -18,14 +18,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Julia 1.11 is the floor, so that unregistered dependencies can
-        # be located with `[sources]` entries -- a 1.11 key. It was 1.10
-        # (the LTS) for a while after TreeAMR was registered, and went
-        # back to 1.11 on 2026-09-25 with all the Tree* packages.
-        version: ["1.11", "1"]
+        # Julia 1.13 is the floor and the only version tested, with all
+        # the Tree* packages since 2026-10-16 ("File layout" in
+        # CODE.md has the history).
+        version: ["1.13"]
         os: [ubuntu-latest, macOS-latest]
         include:
-          - version: "1"
+          - version: "1.13"
             os: ubuntu-latest
             threads: 4
     steps:
@@ -82,7 +81,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: julia-actions/setup-julia@v3
         with:
-          version: "1"
+          version: "1.13"
       - uses: julia-actions/cache@v3
       - name: Instantiate the viewer environment
         run: julia --project=bin -e 'using Pkg; Pkg.instantiate()'

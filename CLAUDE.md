@@ -109,15 +109,12 @@ nearly all of it compiling the two firing kernels.
   way to measure a TreeAMR that is not the one CI measures. A freed
   entry says `registries = "General"` and carries no `repo-rev`; check
   for that rather than for the absence of an error.
-- **The floor is Julia 1.11, so that `[sources]` is available.** It
-  was 1.11 first because TreeAMR was unregistered and `Project.toml` had
-  to locate it with a `[sources]` entry, a 1.11 key; when TreeAMR was
-  registered (2026-09-21, 0.1.1) the entry went and the floor dropped to
-  the LTS, 1.10. On 2026-09-25 it went back to 1.11 across all the Tree*
-  packages, to simplify depending on unregistered packages. To check a
-  change end-to-end the way CI will see it, at both ends of the matrix:
-  `git archive HEAD | tar -x -C /tmp/clean && julia --project=/tmp/clean -e 'using Pkg; Pkg.test()'`
-  and the same with `julia +1.11`.
+- **The floor is Julia 1.13, and CI tests nothing else.** It was
+  raised from 1.11 on 2026-10-16 across all the Tree* packages, because
+  supporting older versions slowed development; `CODE.md` ("File
+  layout") has the history. Do not add version checks or workarounds
+  for older Julias. To check a change end-to-end the way CI will see it:
+  `git archive HEAD | tar -x -C /tmp/clean && julia --project=/tmp/clean -e 'using Pkg; Pkg.test()'`.
 - **The pulse's `∂ₜu` sign is load-bearing.** `u = G(x - t)` gives
   `∂ₜu = -G'`. The wrong sign does not reverse the pulse, it splits it,
   and the failure looks like an instability rather than like bad initial
@@ -266,10 +263,12 @@ nearly all of it compiling the two firing kernels.
   added on top of the count given, so with `JULIA_EXCLUSIVE=1` pinning one
   thread per core, `-t 64` on a 64-core node dies with "Too many threads
   requested for JULIA_EXCLUSIVE option" -- at the *end* of a sweep that
-  had already run for eight minutes. `-t N,0` asks for exactly `N` on
-  1.13 and is rejected by 1.11 ("n and m must be integers >= 1"), which
-  is the cluster's version, so `bin/benchmark.sbatch` does not pin at
-  all rather than pin every point of the sweep but the last.
+  had already run for eight minutes. `-t N,0` asks for exactly `N`, but
+  Julia 1.11, the cluster's version when the thread table in `CODE.md`
+  was taken, rejected it, so `bin/benchmark.sbatch` does not pin at all
+  rather than pin every point of the sweep but the last. It now runs
+  juliaup's 1.13, so pinning is possible, at the price of measuring the
+  table again.
 - **Julia's precompilation cache is per CPU target.** Precompiling on a
   cluster's login node does not help its compute nodes if the two are
   different machines -- on Symmetry the login node is Intel and the AMD
@@ -301,10 +300,10 @@ Match TreeAMR's style, since the two are read together:
 - `Manifest.toml` is gitignored (both root and `bin/`), as is `TODO.md`. This
   file is *not* — `CLAUDE.md` is committed, so an edit to it lands in the diff
   and belongs in the commit message like any other change.
-- **`bin/Project.toml` needs Julia 1.11**, because its
+- **`bin/Project.toml` needs Julia 1.11 or later**, because its
   `TreeWave = {path = ".."}` source is a real dependence on `[sources]`
-  and is the one that cannot go away. The root project's floor is 1.11
-  too now, so the two agree.
+  and is the one that cannot go away. The root project's floor of 1.13
+  covers it.
 - **`bin/` has its own Manifest**, so `Pkg.update("TreeAMR")` in the root does
   not touch it. After a TreeAMR change, update both or the viewer fails with a
   `MethodError` on an API the tests are already using.
