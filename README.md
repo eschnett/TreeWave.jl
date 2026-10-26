@@ -7,6 +7,15 @@
 sample application for
 [TreeAMR](https://github.com/eschnett/TreeAMR.jl).
 
+**Contents**
+
+- [What it solves](#what-it-solves)
+- [Running it](#running-it)
+- [Threads and devices](#threads-and-devices)
+- [Design](#design)
+
+## What it solves
+
 That is `∂ₜu = v`, `∂ₜv = ∇²u` on a periodic box, with three initial
 conditions: a standing sine mode, used to measure convergence order; a
 travelling super-Gaussian pulse, used to exercise a refined region that
@@ -28,6 +37,8 @@ cell centring needs two. `cellcentered(D)` runs the same studies for
 comparison, and does so in CI. "Centerings" in [CODE.md](CODE.md) has what
 changes and what, measurably, does not.
 
+## Running it
+
 ```bash
 julia --project=. -e 'using Pkg; Pkg.test()'   # the acceptance tests
 julia --project=bin bin/visualize.jl           # solution, error, error norms
@@ -37,20 +48,21 @@ julia --project=bin bin/visualize2d.jl         # the blast wave and its mesh
 julia -t auto --project=. bin/benchmark.jl     # where the time goes
 ```
 
+## Threads and devices
+
 It runs threaded with nothing to configure: start Julia with `-t` and
 every loop over blocks — TreeAMR's and this package's — is parallel, and
-the answer is bit-identical whatever the thread count. What that does
-*not* buy is the whole step, because the integrator's stage arithmetic
-stays serial; the measured numbers are in [CODE.md](CODE.md).
+the answer is bit-identical whatever the thread count. What that does and
+does not buy is measured under "Multi-threading" in [CODE.md](CODE.md).
 
 It also runs on a GPU with nothing to configure but where the storage
 goes: every driver takes a KernelAbstractions `backend` alongside its
 type, and both viewers and the benchmark take `--backend=cuda|metal`. No
-device package is a dependency of this one. What that buys is the
-compute-bound work — 5× on initial data on an M3 Pro, 180× on an H200 —
-and, on unified memory, nothing at all on the memory-bound right-hand
-side. On an H200, where there *is* bandwidth to win, that same right-hand
-side gets 36×. "Running on a device" in [CODE.md](CODE.md) has both
-tables and the reason they differ.
+device package is a dependency of this one. "Running on a device" in
+[CODE.md](CODE.md) has what that buys on an M3 Pro and on an H200, both
+tables, and the reason they differ.
 
-See [CODE.md](CODE.md) for the design and the measured results.
+## Design
+
+See [CODE.md](CODE.md) for the design and the measured results, and
+[HISTORY.md](HISTORY.md) for how it got there.
