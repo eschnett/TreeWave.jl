@@ -76,16 +76,18 @@ The global reference amplitude of each variable in `vars`: the largest
 [`lohner`](@ref) refers its noise floor to.
 
 One reduction over the whole field set, so it is computed once per
-flagging pass and not once per block.
+flagging pass and not once per block. `vars` is an integer or a
+contiguous range, as for TreeAMR's `mesh_fold`.
 
-Threaded over blocks, with one partial maximum per block and the maxima
-combined afterwards. `max` is exact and the partials live in a
-block-indexed array, so the answer is bit-identical whatever the thread
-count — the property TreeAMR's M5 holds itself to, and which stops at the
-first application loop that does not.
+One sweep reads every variable in `vars` at once, folding each point
+into one running maximum per variable, block by block, and the blocks'
+maxima are combined afterwards. `max` is exact and the partials live in
+a block-indexed array, so the answer is bit-identical whatever the
+thread count — the property TreeAMR's M5 holds itself to, and which
+stops at the first application loop that does not.
 
-A *global* maximum, through TreeAMR's `mesh_mapreduce` rather than a
-`maximum` of `block_mapreduce`'s per-block values. The two agree on one
+A *global* maximum, through TreeAMR's `mesh_fold` rather than a
+`maximum` of `block_fold`'s per-block values. The two agree on one
 process; on a distributed mesh the second would be each rank's own
 maximum, so the floor — and with it the mesh — would depend on the rank
 count, and a rank holding no blocks would throw.
@@ -111,12 +113,20 @@ count, and a rank holding no blocks would throw.
 """
 function field_scales(fs::FieldSet{T}; vars=1:fs.nvars) where {T}
     R = real(float(T))
-    # One reduction per variable rather than one loop over both: a
-    # device reduction is a kernel launch and a launch takes a single
-    # variable range, and two launches once per regrid cost nothing
-    # against the sweep that follows.
-    return [mesh_mapreduce(abs, max, zero(R), fs; vars=v) for v in vars]
+    # One fold over every variable rather than one reduction per
+    # variable: a fold's point carries all of `vars`, so one sweep, one
+    # launch on a device, yields every maximum. The number of variables
+    # is known only at run time, so the call below is one dynamic
+    # dispatch; the kernel itself is specialized on it.
+    init = ntuple(_ -> Max(zero(R)), length(vars))
+    peaks = mesh_fold(fold_peaks, TreeAMR.combine, init, fs; vars=vars)
+    return [peak.value for peak in peaks]
 end
+
+# A fold's `rf` for `field_scales`: each selected variable's `|value|`
+# into its own maximum.
+fold_peaks(acc, p) =
+    map((peak, x) -> TreeAMR.combine(peak, Max(abs(x))), acc, p.u)
 
 """
     cell_tau(work, idx, b, vars, scales, ε)
