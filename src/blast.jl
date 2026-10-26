@@ -274,27 +274,28 @@ A fraction of *cells*, so it is `Float64` at every precision rather than the
 run's own type — see the rule under "Precision" in `CODE.md`.
 """
 function blast_coverage(fs::FieldSet{T}) where {T}
-    # Three reductions over the whole mesh, all through TreeAMR's
-    # `mesh_mapreduce`, so none reads a cell from the host and every one
-    # is global: combining per-block values here would give each rank of a
-    # distributed mesh its own peak and its own counts. The two counts
-    # cannot start until the peak is known.
+    # Two sweeps over the whole mesh, both through TreeAMR, so neither
+    # reads a cell from the host and both are global: combining per-block
+    # values here would give each rank of a distributed mesh its own peak
+    # and its own counts. The counts cannot start until the peak is known,
+    # so it has a sweep of its own.
     peak = mesh_mapreduce(abs, max, zero(T), fs; vars=1)
     finest = maxlevel(fs.forest)
 
-    # Integer counts, so the totals are exact under any order. The fine
-    # count selects its blocks with a 0/1 weight on the block's key, which
-    # is how the reduction is told about the tree. TreeAMR's docstring asks
-    # for a floating-point `init` with a weight, because a weight is
-    # usually a volume; this one is an integer, `oftype(0, 1)` is exact,
-    # and a `0.0` would put a `Float64` accumulator in the device kernel,
-    # which Metal cannot run.
+    # Both counts in one fold. They are integers, so the totals are exact
+    # under any order, and `Int` rather than `0.0`, which would put a
+    # `Float64` accumulator in the device kernel, which Metal cannot run.
+    # The fine count is told about the tree through a tag on the block's
+    # key.
     half = peak / 2
-    hot(x) = abs(x) > half
-    total = mesh_mapreduce(hot, +, 0, fs; vars=1)
+    function tally(acc, p)
+        hot = abs(p.u[1]) > half
+        return TreeAMR.combine(acc, (Sum(Int(hot)), Sum(Int(hot & p.tag))))
+    end
+    counts = mesh_fold(tally, TreeAMR.combine, (Sum(0), Sum(0)), fs;
+                       vars=1, tag=key -> level(key) == finest)
+    total, fine = counts[1].value, counts[2].value
     total == 0 && return 1.0
-    fine = mesh_mapreduce(hot, +, 0, fs; vars=1,
-                          weight=key -> Int(level(key) == finest))
     return fine / total
 end
 

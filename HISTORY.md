@@ -31,6 +31,7 @@ layouts — and, as its other half, conservation at coarse-fine faces
   - [The refinement flags' scaling](#the-refinement-flags-scaling)
 - [Running on a device](#running-on-a-device)
   - [The diagnostics move to `mesh_mapreduce`](#the-diagnostics-move-to-mesh_mapreduce)
+  - [The diagnostics move to `mesh_fold`](#the-diagnostics-move-to-mesh_fold)
   - [M3 Pro timings before M8](#m3-pro-timings-before-m8)
 - [Measured results](#measured-results)
   - [The blast wave's L2 rate](#the-blast-waves-l2-rate)
@@ -200,6 +201,29 @@ vector, and is now a third pass.
 upstream exported it; see
 [The one exception to "public API only"](#the-one-exception-to-public-api-only).
 
+### The diagnostics move to `mesh_fold`
+
+Until TreeAMR 0.2.6 a reduction saw one value at a time and nothing else,
+so every number a diagnostic needed was a sweep of its own, and the
+part that needed the tree entered as a 0/1 per-block `weight` that
+scaled a block's value after the fact: `field_scales` was one
+`mesh_mapreduce` per variable, `track_pulse`'s tracking measure two (the
+whole peak, and the refined peak with `weight = level(key) > 0`), and
+`blast_coverage` three (the peak, the hot count, and the fine count with
+`weight = Int(level(key) == finest)`). The fine count's weight had to be
+an `Int` with an integer `init` — TreeAMR's docstring asked for a
+floating-point one, since a weight is usually a volume, and a `0.0`
+would have put a `Float64` accumulator in a kernel Metal cannot run.
+
+TreeAMR 0.2.6 (M15, 2026-10-22, designed with TreeGeneralizedHarmonic)
+added folds over points, which hand the callback every selected variable
+and a per-block tag, so on 2026-10-26 each diagnostic became one fold:
+`blast_coverage` keeps a separate sweep for its peak, which the counts
+need first, and the weights became `Bool` tags. Every value is a maximum
+or an integer count, so nothing moved, and `test/threading_tests.jl`'s
+bit-for-bit comparison against the serial loops passed unchanged. The
+bound went to `"0.2.6"` with it ([The TreeAMR bound](#the-treeamr-bound)).
+
 ### M3 Pro timings before M8
 
 The M3 Pro tables in
@@ -243,7 +267,16 @@ The `[compat]` bound on TreeAMR ([CODE.md](CODE.md#file-layout)) was
 `"0.1.0"` until the diagnostics moved to `mesh_mapreduce`, which 0.1.2
 added, and `"0.1.2"` until TreeAMR 0.2.0, whose only break moved the
 checkpoint functions out into the companion package TreeIOHDF5; nothing
-here writes checkpoints, so the change was the bound alone.
+here writes checkpoints, so the change was the bound alone. It was
+`"0.2"` until 2026-10-26, when the diagnostics moved to the folds over
+points that 0.2.6 added ([The diagnostics move to
+`mesh_fold`](#the-diagnostics-move-to-mesh_fold)). The other floors
+(SciMLBase, OrdinaryDiffEqLowOrderRK, SpecialFunctions, and MultiFloats
+for the tests) were left where they were, since nothing newer from them
+is used; the same update resolved SciMLBase 3.58.0,
+OrdinaryDiffEqLowOrderRK 2.2.6, SpecialFunctions 2.9.1 and TreeAMR
+0.2.6. KernelAbstractions stayed at 0.9.45: 0.10 was out, but every
+TreeAMR release so far admits only `0.9.42-0.9` and `1`.
 
 ### From two branch pins to one bound
 

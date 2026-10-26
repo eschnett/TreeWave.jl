@@ -36,8 +36,8 @@ end
     # milliseconds and names the function, where the subprocess test says
     # only that two long outputs differ.
     #
-    # Two of the four now reach the answer through TreeAMR's
-    # `mesh_mapreduce` rather than through a loop here (see "Running on a
+    # Two of the four now reach the answer through TreeAMR's `mesh_fold`
+    # and `mesh_mapreduce` rather than through a loop here (see "Running on a
     # device" in CODE.md), so for those this guards a *boundary*: the
     # value has to stay the one the serial loop gave, whoever computes
     # it, and an upstream change of summation order would show up here

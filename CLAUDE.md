@@ -208,13 +208,14 @@ Each is the rule; the `CODE.md` section named after it has the reason.
   cells; that is launch overhead, not a regression. Measure phases at
   `--n=128 --roots=32` (29.4M cells) ("What it buys on this hardware, and
   what it does not").
-- **A reduction that crosses blocks goes through `mesh_mapreduce`, never
-  through a `maximum` or `sum` of `block_mapreduce`.** That covers
-  `field_scales`, `blast_coverage` and `track_pulse`'s tracking measure;
-  a diagnostic that needs the tree passes it as a 0/1 `weight` ("What an
-  application has to do that the mesh does not"). Its old, unexported
-  name was `TreeAMR.block_partials`; prose here still saying that is
-  stale.
+- **A reduction that crosses blocks goes through `mesh_fold` or
+  `mesh_mapreduce`, never through a `maximum` or `sum` of `block_fold`
+  or `block_mapreduce`.** That covers `field_scales`, `blast_coverage`
+  and `track_pulse`'s tracking measure; several numbers from one sweep
+  are one fold, and a diagnostic that needs the tree passes it as the
+  fold's `tag` ("What an application has to do that the mesh does not").
+  `block_mapreduce`'s old, unexported name was `TreeAMR.block_partials`;
+  prose here still saying that is stale.
 - **`julia -t N` asks for `N + 1` threads**; `-t N,0` asks for exactly
   `N`. `bin/benchmark.sbatch` does not pin ("What it buys, and what caps
   it").

@@ -853,8 +853,8 @@ Two of the four have since gone back upstream. `field_scales` and
 `blast_coverage` were per-block reductions over field data, which is
 exactly what `TreeAMR.block_mapreduce` is, and a per-block reduction over
 field data is the one shape that has to change on a device. They now call
-its whole-mesh form, `mesh_mapreduce`, and the discipline above is
-upstream's to keep; the two that remain
+its whole-mesh forms, `mesh_fold` and `mesh_mapreduce`, and the
+discipline above is upstream's to keep; the two that remain
 here are the Hankel table and its contraction, which are host `Float64`
 tables and not field data at all. See
 [Running on a device](#running-on-a-device).
@@ -1077,32 +1077,44 @@ centerings.
 
 **Three diagnostics were per-block reductions over field data.**
 `field_scales`, [`blast_coverage`](src/blast.jl) and `track_pulse`'s
-tracking measure go through `mesh_mapreduce` — `block_mapreduce`'s
-threaded host views on the CPU, one kernel work item per block otherwise,
-then the per-block values combined in block order either way. They call
-it rather than reimplement it because a second copy of a determinism
-argument is a second thing to get wrong.
+tracking measure go through TreeAMR's folds over points, `mesh_fold`
+(and `blast_coverage`'s peak through `mesh_mapreduce`): each block one
+sequential pass in index order on the CPU, several lanes per block
+folded in lane order on a device, then the per-block values combined in
+block order either way. They call upstream rather than reimplement it
+because a second copy of a determinism argument is a second thing to get
+wrong.
 
-A `maximum` or `sum` of `block_mapreduce`'s per-block vector, combined
-here, gives the same answer on one process and not on a distributed
-mesh: `block_mapreduce` returns only the calling rank's blocks, so a
-`maximum` of it is a per-rank Löhner scale — the mesh would depend on the
-rank count, and a rank with no blocks would throw — and the two coverage
-measures would be rank-local. `mesh_mapreduce` is where upstream does the
-cross-rank combine, so the three reach it, and the part that needs the
-*tree* — which blocks are refined, which are at the finest level — enters
-as a 0/1 `weight` on each block's key rather than by indexing the
-per-block vector by block: `level(key) > 0` for the pulse's refined
-peak, `level(key) == maxlevel(forest)` for the blast's fine count. Use an
-integer `init` with an integer weight when counting: a `0.0` would put a
-`Float64` accumulator in the device kernel. Every one is exact — a `max`,
-or a sum of integers — and `test/threading_tests.jl` asserts them against
-the serial loops bit for bit. The cost is a third pass in
-`blast_coverage`, which runs once per regrid. `block_mapreduce` stays
-right for a value that is per block by nature. How the diagnostics got
-here, and the private name `block_mapreduce` had before upstream
-exported it, are in
-[HISTORY.md](HISTORY.md#the-diagnostics-move-to-mesh_mapreduce).
+A fold hands its callback a whole point — every selected variable, and a
+per-block `tag` — and carries any `isbits` accumulator, so each
+diagnostic is one sweep however many numbers it needs: `field_scales`
+takes the maximum of every variable at once, `track_pulse` its two peaks
+at once, and `blast_coverage` its two counts at once. Only
+`blast_coverage`'s peak needs a sweep of its own, because the counts
+cannot start until it is known. The accumulators are built from
+TreeAMR's `Max` and `Sum`, and `TreeAMR.combine` is the `op`, so a field
+cannot be combined the wrong way.
+
+A `maximum` or `sum` of `block_fold`'s or `block_mapreduce`'s per-block
+vector, combined here, gives the same answer on one process and not on a
+distributed mesh: both return only the calling rank's blocks, so a
+`maximum` of one is a per-rank Löhner scale — the mesh would depend on
+the rank count, and a rank with no blocks would throw — and the two
+coverage measures would be rank-local. `mesh_fold` and `mesh_mapreduce`
+are where upstream does the cross-rank combine, so the three reach them,
+and the part that needs the *tree* — which blocks are refined, which are
+at the finest level — enters as the fold's `tag`, a `Bool` of each
+block's key, rather than by indexing the per-block vector by block:
+`level(key) > 0` for the pulse's refined peak,
+`level(key) == maxlevel(forest)` for the blast's fine count. Count in
+`Int`, not in `0.0`: a `Float64` accumulator would not run on Metal.
+Every one is exact — a `max`, or a sum of integers — and
+`test/threading_tests.jl` asserts them against the serial loops bit for
+bit. `block_mapreduce` and `block_fold` stay right for a value that is
+per block by nature. How the diagnostics got here — a 0/1 `weight` and a
+pass per number before the folds, and the private name
+`block_mapreduce` had before upstream exported it — is in
+[HISTORY.md](HISTORY.md#the-diagnostics-move-to-mesh_fold).
 
 **One callback closed over arrays.** [`blast_exact`](src/blast.jl) closes
 over the two radial profiles of the Hankel table, so on a device they are
@@ -1244,6 +1256,25 @@ how the per-block maxima are combined, and its time did not move
 (0.091 → 0.075 s and 0.019 → 0.018, within the spread). Ratios, not
 seconds, are what to carry over into the tables: the absolute numbers
 come from a different sweep.
+
+The `field_scales` and `blast_coverage` rows in every table here also
+predate the move to `mesh_fold`, which was measured the same way: the
+`mesh_mapreduce` forms and the folds side by side in one process, at
+`Float32` on the same 29.4M-point mesh, against TreeAMR 0.2.6 on the M3
+Pro (2026-10-26, results identical, the minimum of fourteen):
+
+| | CPU, 1 thread | CPU, 8 threads | Metal |
+|---|---|---|---|
+| `field_scales` | 0.067 → 0.0195 s (0.29×) | 0.0108 → 0.0040 (0.37×) | 0.0036 → 0.0030 (0.84×) |
+| `blast_coverage` | 0.100 → 0.0575 (0.57×) | 0.0169 → 0.0100 (0.59×) | 0.0053 → 0.0043 (0.80×) |
+| `track_pulse`'s measure | 0.0665 → 0.0165 (0.25×) | 0.0109 → 0.0032 (0.29×) | 0.0035 → 0.0022 (0.62×) |
+
+On the CPU a fold sweep is cheaper than a `mesh_mapreduce` sweep as well
+as there being fewer of them: one fold reading both variables costs less
+than one reduction reading one. On Metal both forms are already several
+times faster than the table's 0.016 s, which is TreeAMR's device
+reduction having changed since that sweep, not this change; the fold
+adds 1.2–1.6× on top. The H200 rows below were not re-measured.
 
 **Inconsistent:** the paragraph above puts the thread-scaling table
 *below*; it is above, under [What it buys, and what caps
@@ -1480,11 +1511,14 @@ Julia 1.13 is the floor, and the only version CI tests. Who raised it to
 1.13, when and why, and what it was before, is in
 [HISTORY.md](HISTORY.md#the-julia-floor).
 
-TreeAMR is an ordinary `[compat]` bound, `TreeAMR = "0.2"` — the whole
-`0.2` series, not a pin to one release. A resolve takes the newest
-registered `0.2.x`, and the bound is raised only when this package comes
-to need something a newer one added, or when TreeAMR breaks its API in a
-new minor series. Its earlier values are in
+TreeAMR is an ordinary `[compat]` bound, `TreeAMR = "0.2.6"` — the rest
+of the `0.2` series from 0.2.6 on, not a pin to one release; 0.2.6 is the
+release that added the folds over points the diagnostics use (see [What
+an application has to do that the mesh does
+not](#what-an-application-has-to-do-that-the-mesh-does-not)). A resolve
+takes the newest registered `0.2.x`, and the bound is raised only when
+this package comes to need something a newer one added, or when TreeAMR
+breaks its API in a new minor series. Its earlier values are in
 [HISTORY.md](HISTORY.md#the-treeamr-bound).
 
 That is still a moving target, and deliberately so; what changed is the

@@ -181,14 +181,15 @@ function track_pulse(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
 
         # How much of the pulse sits in refined blocks -- the measure of
         # whether the refined region is actually following it. Two global
-        # peaks from the mesh's own reduction, so the data is never read
+        # peaks from one fold of the mesh's own, so the data is never read
         # cell by cell from the host and the answer does not depend on how
-        # the blocks are distributed; the second sees only refined blocks
-        # through a 0/1 weight on the key, which under `max` of `|u|` is
-        # exact.
-        total = mesh_mapreduce(abs, max, zero(T), fs; vars=1)
-        inside = mesh_mapreduce(abs, max, zero(T), fs; vars=1,
-                                weight=key -> level(key) > 0)
+        # the blocks are distributed; the second sees only refined blocks,
+        # which the fold is told through a tag on the key. Both are
+        # maxima, so exact.
+        peaks = mesh_fold(fold_refined_peak, TreeAMR.combine,
+                          (Max(zero(T)), Max(zero(T))), fs;
+                          vars=1, tag=key -> level(key) > 0)
+        total, inside = peaks[1].value, peaks[2].value
         push!(refined_fraction, total > 0 ? inside / total : zero(T))
 
         # The indicator reads a 3-point stencil, so it needs ghosts; and
@@ -207,6 +208,15 @@ function track_pulse(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
 end
 
 track_pulse(valD::Val; kwargs...) = track_pulse(Float64, valD; kwargs...)
+
+# A fold's `rf` for `track_pulse`'s tracking measure: `|u|` into the
+# whole mesh's peak, and into the refined blocks' peak where the block's
+# tag says it is refined. A top-level function, so it captures nothing:
+# it becomes a kernel argument on a device.
+function fold_refined_peak(acc, p)
+    a = abs(p.u[1])
+    return TreeAMR.combine(acc, (Max(a), Max(p.tag ? a : zero(a))))
+end
 
 """
 The same travelling pulse on a *uniform* mesh, as the reference the
