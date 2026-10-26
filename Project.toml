@@ -11,7 +11,7 @@ SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
 TreeAMR = "91bc416d-811c-44c1-9bc4-b9c8bbdbbd08"
 
 [compat]
-KernelAbstractions = "0.9.42, 1"
+KernelAbstractions = "0.9.42"
 OrdinaryDiffEqLowOrderRK = "2.2.5"
 SciMLBase = "3.50.1"
 SpecialFunctions = "2"
