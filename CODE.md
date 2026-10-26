@@ -8,30 +8,69 @@ no physics, so its own wave-equation code lives in its test suite and
 cannot be pointed at as a downstream application. This package is that
 application.
 
+This file describes the package as it is. How it got here — decisions
+with their dates, the measurements later ones replaced, the dependency
+history — is in [HISTORY.md](HISTORY.md), which also says what TreeAMR's
+milestones M5–M8, named below by number, were.
+
+**Contents**
+
+- [Goals](#goals)
+- [Scope and non-goals](#scope-and-non-goals)
+- [The equation](#the-equation)
+- [The right-hand-side contract](#the-right-hand-side-contract)
+- [What bounds checking costs](#what-bounds-checking-costs)
+- [Initial conditions](#initial-conditions)
+  - [Standing sine mode](#standing-sine-mode-srcsinewavejl)
+  - [Travelling super-Gaussian pulse](#travelling-super-gaussian-pulse-srcsupergaussianjl)
+  - [Radial blast wave](#radial-blast-wave-srcblastjl)
+- [Centerings](#centerings)
+- [Operator order: the constraint inherited from TreeAMR](#operator-order-the-constraint-inherited-from-treeamr)
+- [Precision](#precision)
+  - [The rule](#the-rule)
+  - [Base does not come along](#base-does-not-come-along)
+  - [What each type is for, and what is not available](#what-each-type-is-for-and-what-is-not-available)
+  - [What `Float32` cannot do](#what-float32-cannot-do)
+- [The refinement criterion](#the-refinement-criterion)
+  - [The noise floor must be global](#the-noise-floor-must-be-global)
+  - [Two thresholds, meaning two different things](#two-thresholds-meaning-two-different-things)
+  - [Calibrated thresholds](#calibrated-thresholds)
+  - [Buffering: TreeAMR's job, the width ours](#buffering-treeamrs-job-the-width-ours)
+- [Regridding: restart per chunk](#regridding-restart-per-chunk)
+- [Multi-threading](#multi-threading)
+  - [The callbacks are called concurrently, so they must be pure](#the-callbacks-are-called-concurrently-so-they-must-be-pure)
+  - [What was left for the application to thread](#what-was-left-for-the-application-to-thread)
+  - [Bit-identical, not merely to roundoff](#bit-identical-not-merely-to-roundoff)
+  - [What it buys, and what caps it](#what-it-buys-and-what-caps-it)
+- [Running on a device](#running-on-a-device)
+  - [What an application has to do that the mesh does not](#what-an-application-has-to-do-that-the-mesh-does-not)
+  - [Callbacks become kernel arguments](#callbacks-become-kernel-arguments)
+  - [The criterion has two forms, and keeps both](#the-criterion-has-two-forms-and-keeps-both)
+  - [What stays on the host, and why that is not a gap](#what-stays-on-the-host-and-why-that-is-not-a-gap)
+  - [What it buys on this hardware, and what it does not](#what-it-buys-on-this-hardware-and-what-it-does-not)
+  - [Reproducing it](#reproducing-it)
+- [Watching a run: the `observer` keyword](#watching-a-run-the-observer-keyword)
+- [File layout](#file-layout)
+- [Measured results](#measured-results)
+- [Possible extensions](#possible-extensions)
+
 ## Goals
 
 - Show the whole path from mesh to solution: initial data, right-hand
   side, time integration, regridding, error measurement, visualization.
 - Use TreeAMR's public API. Nothing here is mesh machinery that belongs
-  upstream, and there are now no exceptions. There was exactly one, and
-  recording it rather than quietly taking it is what got it fixed:
-  `TreeAMR.block_partials`, the per-block reduction every diagnostic
-  upstream is built on, was unexported and ought not to have been.
-  Upstream agreed, and it is now public as `block_mapreduce` — with a
-  better signature than the one this package was reaching for — and its
-  whole-mesh form `mesh_mapreduce` is what the diagnostics here now
-  call. See [Running on a device](#running-on-a-device).
+  upstream, and there are now no exceptions; [HISTORY.md](HISTORY.md#the-one-exception-to-public-api-only)
+  has the one there was.
 - Be small enough to read in one sitting.
 - Run in the caller's floating-point type, not only `Float64` — TreeAMR's
   mesh is generic and an application that is not would give the genericity
   nowhere to go. See Precision.
-- Run where the caller's storage is, not only on the host — same argument,
-  one milestone later. See Running on a device.
+- Run where the caller's storage is, not only on the host — same argument.
+  See Running on a device.
 - Run where the caller's *values* are, not only at cell centres — the same
-  argument a milestone later again, and the one that pays back rather than
-  merely generalizing: the wave equation's natural layout is vertex
-  centring, and adopting it makes the interface-order rule cheaper. See
-  Centerings.
+  argument again, and the one that pays back rather than merely
+  generalizing: the wave equation's natural layout is vertex centring, and
+  adopting it makes the interface-order rule cheaper. See Centerings.
 
 ## Scope and non-goals
 
@@ -96,7 +135,7 @@ ghost schedule, the per-block spacings, and — as `Val{D}` and `Val{G}` —
 the two parameters the kernel specializes on. Building the `Val`s per
 evaluation instead would recompile or dynamically dispatch the kernel on
 every RK stage. `G` is read from a runtime field — `fs.G`, an
-`NTuple{D,Int}` since M8, one width per dimension — so the *constructor*
+`NTuple{D,Int}`, one width per dimension — so the *constructor*
 is type-unstable by design; it is called once per chunk, never per step.
 There is no `Val{C}`: the centering never reaches the kernel, because the
 stencil does not depend on it. See Centerings.
@@ -215,14 +254,10 @@ all.
 
 The minus sign on `∂ₜu` is load-bearing: for `u = G(x - t)` the chain rule
 gives `∂ₜu = -G'`, and initial data with the wrong sign matches neither
-characteristic, so the pulse splits rather than travelling. (This was a
-real bug in the first draft of this package, introduced when TreeAMR's
-closed-form Gaussian derivative was replaced by a call to
-`dsupergaussian` and the sign that had been folded into the algebra was
-lost. The measured L∞ error at the pulse test's finest mesh was 110
-before the fix and 43 after, against 0.09 once the resolution question
-below was also settled — the sign fix alone was not enough to make the
-error small, which is why both had to be found.)
+characteristic, so the pulse splits rather than travelling — it does not
+reverse — and the failure looks like an instability rather than like bad
+initial data. It was a real bug once;
+[HISTORY.md](HISTORY.md#the-pulses-sign-bug) has it.
 
 **The order `n` is a keyword, defaulting to 1** (the ordinary Gaussian),
 because raising it trades localization against resolvability and the mesh
@@ -320,6 +355,11 @@ quadrature's own error is ~9e-7, four orders below the finest
 discretization error, so what the comparison measures is the scheme and
 not the table.
 
+**Inconsistent:** the rates here (L2 1.99, L∞ 1.95) are not the ones
+under [Measured results](#measured-results), which gives L2 1.98 and L∞
+1.96 vertex-centred / 1.95 cell-centred, as do the comments in
+`test/blast_tests.jl` and `test/blast_cell_tests.jl`.
+
 ## Centerings
 
 A field set carries, per dimension, whether its values sit at cell centres
@@ -365,14 +405,24 @@ and lives on the field set, a `GhostSchedule` is built from the field set
 because it belongs to a layout, `regrid!` takes `fs => schedule` pairs
 because a bare field set no longer says which schedule moves it, and
 `hostcopy` has to reproduce the whole layout rather than just the forest.
-Every one of those fails loudly if missed, which is the pleasant half.
+Every one of those fails loudly if missed (`Int + NTuple` is a
+`MethodError`, and `fs.forest.G` no longer exists), which is the pleasant
+half. `GhostSchedule(fs, ops)` takes the ghost width, centering, element
+type and backend from the field set; the forest form still exists but
+needs all four spelled out, and is the way to get a subtly wrong
+schedule. `regrid!` rejects the M6 spelling by name rather than with a
+`MethodError`.
 
 Three places did have to learn the difference, and all three are about
 *where a value is*, not about what is done to it:
 
-- `coordinates(fs, b, idx)` replaced `cell_center`, and takes the field
-  set rather than the forest, because the answer depends on the ghost
-  width and the centering and the forest carries neither.
+- `coordinates(fs, b, idx)` takes the field set rather than the forest,
+  because the answer depends on the ghost width and the centering and the
+  forest carries neither. It indexes the **stored** array, so owned point
+  `i` is `idx = i + fs.G[d]`. Off-by-`G`, or reconstructing a position as
+  `origin + (i - 1/2)h` instead of asking, produces plots that look almost
+  right — and on a vertex mesh the second one is wrong by half a spacing
+  everywhere.
 - The 1D viewer asks `coordinates` for its x values instead of adding
   `h/2` to a block origin.
 - The 2D viewer draws each sample's own dual cell — half a spacing either
@@ -687,7 +737,8 @@ that choice is load-bearing. A block refined to the cap has by construction stop
 being under-resolved — its τ fell below `refine_tol`, which is precisely why
 refinement stopped there — so keying the box on `refine_tol` would make a
 feature-holding block at the cap report nothing, and the `(Keep, box)` margin below
-would be unreachable in the one case it exists for.
+would be unreachable in the one case it exists for — the mesh still works, just
+worse, which is the hard kind of bug to notice.
 
 τ vanishes wherever the second difference does, so a Gaussian's inflection points
 score zero even though the feature is right there. The reduction to a block verdict
@@ -722,6 +773,11 @@ binding. Note that an earlier closed-form estimate for τ *at the pulse peak*,
 `(h²/σ²)/(h²/σ² + 4ε)`, gave 0.49 / 0.19 / 0.056: the right shape but about 3×
 low, because the maximum over a block is not at the peak. The measured column is
 the one to trust.
+
+The cap's keyword is `maxlevel_cap`, not `maxlevel`: TreeAMR exports
+`maxlevel(forest)`, and a keyword of that name shadows it inside the function
+body; `maxlevel(forest)` then tries to call an integer. `maxlevel_cap` also says
+what it is — at calibrated tolerances it never binds.
 
 ### Buffering: TreeAMR's job, the width ours
 
@@ -766,14 +822,9 @@ per-cell kernel (KernelAbstractions' CPU backend spreads a launch over
 passes call code that lives *here* — the initial-data callback given to
 `fill_by_coordinates!`, which upstream turned into a kernel, and the flag
 function given to `flag_blocks`, which is where the Löhner sweep of
-[`cell_indicator`](src/refinement.jl) runs. Both were parallelized by
-updating the dependency and changing nothing.
-
-That also made the package most of the way ready for TreeAMR's M6: its
-initial data already ran inside a kernel that reaches the geometry
-through per-block `block_origins`/`block_spacings` arrays rather than
-through the tree, which is the shape a device demands. What was left, and
-what it cost, is [Running on a device](#running-on-a-device).
+[`cell_indicator`](src/refinement.jl) runs.
+[HISTORY.md](HISTORY.md#threading-the-applications-own-loops) has how
+both came to be parallel.
 
 ### The callbacks are called concurrently, so they must be pure
 
@@ -792,13 +843,11 @@ load-bearing rather than incidental.
 
 ### What was left for the application to thread
 
-Four loops here were reached by none of the above, and they were measured
-before they were touched — 0.98×, 1.01× and 0.98× at eight threads for
-the three the benchmark already covered, which is the flat line a serial
-loop should give and the check that the benchmark reads what it claims
-to. Each was then written the way upstream writes its own: one slot per
-block (or column, or radius), combined afterwards in a fixed order, never
-an accumulator shared between tasks.
+Four loops here were reached by none of the above. Each was written the
+way upstream writes its own: one slot per block (or column, or radius),
+combined afterwards in a fixed order, never an accumulator shared between
+tasks. What they measured before and after is in
+[HISTORY.md](HISTORY.md#threading-the-applications-own-loops).
 
 Two of the four have since gone back upstream. `field_scales` and
 `blast_coverage` were per-block reductions over field data, which is
@@ -810,7 +859,8 @@ here are the Hankel table and its contraction, which are host `Float64`
 tables and not field data at all. See
 [Running on a device](#running-on-a-device).
 
-**The Hankel contraction is the instructive one.** Its natural outer loop
+**The Hankel contraction (`blast_radial_table`) is the instructive one.**
+Its natural outer loop
 is over modes, and that loop cannot be split: every `k` contributes to
 every `r`, so `us` and `vs` would be shared and the summation order — and
 therefore the last bits of the answer — would follow the thread count.
@@ -905,19 +955,14 @@ statement is not "we could turn it on" but "the stage updates have to join
 the pool that is already running" — which means a time integrator written
 as kernels, listed under Possible extensions rather than done.
 
-**Interleaving the pages helps, and an earlier reading of this table said
-it did not.** That earlier entry recorded "the RHS is *slower*
-interleaved (0.033 s against 0.047)" and concluded that TreeAMR's 2–6×
-did not reproduce downstream. The two seconds in it are almost exactly
-what this sweep measures — 0.0365 interleaved against 0.0479 default at
-64 threads — but they are the *interleaved* figure first, so they say the
-opposite of the sentence around them. The conclusion was drawn from a
-transposition, and it is withdrawn: at 64 threads interleaving makes the
-RHS 24% faster, initial data 37% faster (0.0484 against 0.0763) and the
-Hankel table 29% faster, while the whole step is 2% slower and the
-per-block reductions are a wash. That is smaller than upstream's 2–6× and
-in the same direction, which is the unremarkable answer the first reading
-turned into a puzzle.
+**Interleaving the pages helps.** At 64 threads interleaving makes the
+RHS 24% faster (0.0365 s interleaved against 0.0479 default), initial
+data 37% faster (0.0484 against 0.0763) and the Hankel table 29% faster,
+while the whole step is 2% slower and the per-block reductions are a
+wash. That is smaller than upstream's 2–6× and in the same direction. An
+earlier reading of this table said it did not help;
+[HISTORY.md](HISTORY.md#page-interleaving-read-the-wrong-way-round) has
+how that came about.
 
 The reason the effect is modest here is still worth keeping: every large
 array gets a good first touch for free, because `FieldSet` and
@@ -937,26 +982,14 @@ because at that point the pass itself is a few milliseconds and the cost
 of spawning is not negligible against it; both are once per regrid, so
 this is left alone rather than given a grain-size heuristic.
 
-**The refinement flags are the row that changed, and the port is not
-why.** They reach 3.9× at 8 threads and then *fall* — 4.04, 3.70, 3.35 —
-where the entry here previously recorded 8.00× and 33.9×. That was worth
-attributing rather than overwriting, so it was measured directly: the
-pre-M8 package, at its own TreeAMR pin and cell-centred, was run beside
-this one **in a single job on a single node**, and
-
-| phase | pre-M8, cell | this, vertex |
-|---|---|---|
-| `refine_flags`, 1 → 16 threads | 2.378 → 0.664 s (3.58×) | 2.388 → 0.697 s (3.43×) |
-| `initial_data`, 1 → 16 | 3.071 → 0.191 s (16.1×) | 3.069 → 0.193 s (15.9×) |
-| `rhs`, 1 → 16 | 0.582 → 0.0474 s (12.3×) | 0.613 → 0.0533 s (11.5×) |
-
-— so the old figure does not reproduce for the *old code* either, on this
-machine today. Whatever changed is the machine or the Julia version, not
-M8 and not the stagger. The shape of the curve says a serial remainder of
-roughly 0.6 s in a 2.4 s pass, which is what `flag_blocks` boxing 1792
+**The refinement flags** reach 3.9× at 8 threads and then *fall* — 4.04,
+3.70, 3.35. The shape of the curve says a serial remainder of roughly
+0.6 s in a 2.4 s pass, which is what `flag_blocks` boxing 1792
 `(flag, box)` tuples into a `Vector{Any}` and then narrowing it would look
-like; that code is upstream's and unchanged. Recorded as a number that
-moved and is only half explained, rather than quietly replaced.
+like; that code is upstream's and unchanged. **(open)** That is only half
+an explanation. The figure this row replaced, and the measurement that
+ruled out this package's own changes as the cause, are in
+[HISTORY.md](HISTORY.md#the-refinement-flags-scaling).
 
 The compute-bound phases behave as they should: initial data 40×, the
 exact ring 48×, the Hankel table 38× — all more than the memory-bound RHS,
@@ -964,12 +997,27 @@ and the first two more than linear, which is what happens when one
 thread's working set is limited by one NUMA domain's bandwidth and 64
 threads' is not.
 
+**Inconsistent:** the docstring of `blast_reference` in `src/blast.jl`
+says the Hankel table was "measured at 39× on 64 cores"; the table above
+has 38.3× (54.6× interleaved).
+
+**`julia -t N` asks for `N + 1` threads.** The interactive thread is
+added on top of the count given, so with `JULIA_EXCLUSIVE=1` pinning one
+thread per core, `-t 64` on a 64-core node dies with "Too many threads
+requested for JULIA_EXCLUSIVE option" -- at the *end* of a sweep that
+had already run for eight minutes. `-t N,0` asks for exactly `N`, but
+Julia 1.11, the cluster's version when the table above was taken,
+rejected it, so `bin/benchmark.sbatch` does not pin at all rather than
+pin every point of the sweep but the last. **(open)** It now runs
+juliaup's 1.13, so pinning is possible, at the price of measuring the
+table again.
+
 ## Running on a device
 
 There is no switch here either. TreeAMR's M6 makes the *storage* decide:
-`backend` is a keyword on `FieldSet` and on nothing else — since M8 a
-schedule is built from the field set and takes the backend with the rest
-of the layout — after which `statevector` allocates where the field set
+`backend` is a keyword on `FieldSet` and on nothing else — a schedule is
+built from the field set and takes the backend with the rest of the
+layout — after which `statevector` allocates where the field set
 lives, `regrid!` reallocates there, and every kernel takes its backend
 from the array it is handed. Every driver therefore takes `backend`
 alongside its `T`, defaulting to `CPU()`:
@@ -980,11 +1028,8 @@ alongside its `T`, defaulting to `CPU()`:
 `T` and `backend` travel together because on a device they are not
 independent: a `Float64` field set on a backend without hardware fp64 is
 refused at construction, with the reason. That is what
-[Precision](#precision) was *for*, and the order the two milestones were
-done in was not arbitrary — a device port on top of a `Float64`-only
-application would have been a rewrite rather than a keyword, and the
-`Float32` work was where the stray `Float64` literals were found while
-they were still cheap to find.
+[Precision](#precision) was *for*; [HISTORY.md](HISTORY.md#the-order-of-the-milestones)
+has why it came first.
 
 No device package becomes a dependency. Neither CUDA nor Metal is a
 dependency of TreeAMR, `KernelAbstractions.allocate` is the whole of the
@@ -1038,44 +1083,26 @@ then the per-block values combined in block order either way. They call
 it rather than reimplement it because a second copy of a determinism
 argument is a second thing to get wrong.
 
-They called `block_mapreduce` and combined its per-block vector here
-until TreeAMR 0.1.5, and the part that needed the *tree* — which blocks
-are refined, which are at the finest level — indexed that vector by
-block. On one process that is the same answer. TreeAMR's M7 (0.1.5,
-distributed meshes) audited the downstreams and found that it would not
-stay so: `block_mapreduce` returns only the calling rank's blocks, so a
+A `maximum` or `sum` of `block_mapreduce`'s per-block vector, combined
+here, gives the same answer on one process and not on a distributed
+mesh: `block_mapreduce` returns only the calling rank's blocks, so a
 `maximum` of it is a per-rank Löhner scale — the mesh would depend on the
 rank count, and a rank with no blocks would throw — and the two coverage
 measures would be rank-local. `mesh_mapreduce` is where upstream does the
-cross-rank combine, so the three now reach it, and the tree enters as a
-0/1 `weight` on each block's key: `level(key) > 0` for the pulse's
-refined peak, `level(key) == maxlevel(forest)` for the blast's fine
-count. Every one is exact — a `max`, or a sum of integers — so the
-numbers did not move, and `test/threading_tests.jl` still asserts them
-against the serial loops bit for bit. The cost is a third pass in
-`blast_coverage` (the fine count used to reuse the hot count's per-block
-vector), which runs once per regrid.
-
-That name was `TreeAMR.block_partials` when this was written, and using
-it was the one documented exception to the "public API only" rule, with a
-request to make upstream. Upstream took the request and, in taking it,
-found three things wrong with the signature this package had been
-working around — worth recording, because finding them is the argument
-for reporting an internal you depend on rather than quietly depending on
-it:
-
-- It took a host block-reducer *and* a kernel-form fold, which had to
-  agree and which nothing checked. Every call here passed both, spelled
-  twice (`w -> maximum(abs, w)` and `(a, x) -> max(a, abs(x))`). They can
-  disagree: upstream measured a 3.0e-15 divergence in `D = 1` with a
-  scalar variable selection, where the host view goes `IndexLinear` and
-  `sum` turns pairwise. The public form is `mapreduce`-shaped, so the
-  four call sites here each collapsed to one line.
-- It took a bare array plus the matching ghost offset. Every call here
-  passed `fs.work, fs; g=G`, and getting `g` wrong would have read the
-  ghosts silently. The public form takes the field set and works it out.
-- Its variable selection meant different things on the two backends. The
-  public form refuses anything a kernel cannot take, with a reason.
+cross-rank combine, so the three reach it, and the part that needs the
+*tree* — which blocks are refined, which are at the finest level — enters
+as a 0/1 `weight` on each block's key rather than by indexing the
+per-block vector by block: `level(key) > 0` for the pulse's refined
+peak, `level(key) == maxlevel(forest)` for the blast's fine count. Use an
+integer `init` with an integer weight when counting: a `0.0` would put a
+`Float64` accumulator in the device kernel. Every one is exact — a `max`,
+or a sum of integers — and `test/threading_tests.jl` asserts them against
+the serial loops bit for bit. The cost is a third pass in
+`blast_coverage`, which runs once per regrid. `block_mapreduce` stays
+right for a value that is per block by nature. How the diagnostics got
+here, and the private name `block_mapreduce` had before upstream
+exported it, are in
+[HISTORY.md](HISTORY.md#the-diagnostics-move-to-mesh_mapreduce).
 
 **One callback closed over arrays.** [`blast_exact`](src/blast.jl) closes
 over the two radial profiles of the Hankel table, so on a device they are
@@ -1089,7 +1116,8 @@ Everything a callback captures must be `isbits`, and a captured **`Type`**
 is the trip. `zero(T)` inside a closure whose `T` is a local variable puts
 a `Type` in a kernel argument; `zero(x[1])` reads the type off the
 coordinate the mesh already handed over. Where a `Vector` was captured it
-becomes a device array or a tuple. And two generators —
+becomes a device array (`to_backend`) or a tuple, which is why `cell_tau`
+takes tuples. And two generators —
 `prod(… for d in 1:D)` in `wave_exact` and `sum(d -> …, 1:D)` in
 `blast_initial` — became accumulating loops, the shape TreeAMR's own
 device-tested closures use; multiplying by one and adding zero are exact,
@@ -1120,7 +1148,7 @@ everywhere, and not out of caution:
 - it is what the device form is **tested against**. Both are available on
   the CPU backend, so `test/device_tests.jl` compares them there, flag
   for flag and box for box, on pulse data and on blast data, at two caps,
-  at two precisions and — since M8 — on both centerings. Nothing else in
+  at two precisions and on both centerings. Nothing else in
   the suite would catch a drift: a device run that flagged differently
   would still run, and would merely build a different mesh. The centering
   belongs in that product because the two forms work out a point's stored
@@ -1155,7 +1183,7 @@ than the host loop.
   `hostcopy` brings a field set down in one call at the top of each
   `snapshot`, and no line of figure code below it knows the difference. It
   has to copy the whole *layout* and not merely the forest — ghost width
-  and centering both, since M8 — or the host array is a different shape
+  and centering both — or the host array is a different shape
   from the device one and `copyto!` is the least of the problems.
   That is for a consumer that *cannot* move, not one that has not been
   moved: the numeric diagnostics deliberately do not work this way,
@@ -1217,6 +1245,10 @@ how the per-block maxima are combined, and its time did not move
 seconds, are what to carry over into the tables: the absolute numbers
 come from a different sweep.
 
+**Inconsistent:** the paragraph above puts the thread-scaling table
+*below*; it is above, under [What it buys, and what caps
+it](#what-it-buys-and-what-caps-it).
+
 **The centering costs a few per cent on the RHS and nothing anywhere
 else.** A vertex-like dimension stores one plane more — 133 against 132
 per dimension at `N = 128, G = 2`, 1.5% more bytes — and the one phase
@@ -1228,13 +1260,9 @@ stagger is free": it is free where the arithmetic dominates, and costs
 about what the extra plane weighs where the memory does. The ratios below
 are quoted from the vertex column and hold for either.
 
-These numbers are lower across the board than the ones recorded here
-before M8, on both layouts and on both backends — the eight-thread host
-column most of all (a `step` of 0.244 against 0.348). That is the machine
-and the Julia version, not the port: the cell-centred column *is* the
-pre-M8 configuration, and it moved by the same amount. Ratios between
-columns of one sweep are the thing to read; absolute seconds across
-sweeps are not.
+Ratios between columns of one sweep are the thing to read; absolute
+seconds across sweeps are not. [HISTORY.md](HISTORY.md#m3-pro-timings-before-m8)
+has how far these seconds moved from an earlier sweep, and why.
 
 Read the rest as two populations:
 
@@ -1448,31 +1476,16 @@ cannot check is that a device run *works* — for that, add a device
 package to an environment of your own and set `TREEWAVE_TEST_BACKEND`;
 see [Running on a device](#running-on-a-device).
 
-Julia 1.13 is the floor, and the only version CI tests. Erik raised it
-from 1.11 on 2026-10-16 across all the Tree* packages: supporting the
-older versions slowed development and was not useful at the moment.
-Nothing in the code was specific to 1.11; the raise removed the second
-end of the CI matrix, and moved `bin/benchmark.sbatch` from the cluster's
-`julia/1.11.2` module to juliaup's 1.13. Before that, the floor followed
-`[sources]`, a 1.11 key. It was 1.11 first while TreeAMR was
-unregistered: a clean checkout could not resolve at all without a
-`[sources]` entry to locate TreeAMR — `Manifest.toml` is not tracked, and
-`Project.toml` alone carries only a UUID — which is also why CI was
-impossible before it. When TreeAMR was registered the entry went and the
-floor dropped to the LTS, 1.10, and it went back to 1.11 on 2026-09-25
-across all the Tree* packages, so that any of them could depend on an
-unregistered package through `[sources]` without touching the floor
-again; 1.13 keeps that.
+Julia 1.13 is the floor, and the only version CI tests. Who raised it to
+1.13, when and why, and what it was before, is in
+[HISTORY.md](HISTORY.md#the-julia-floor).
 
-What replaces the entry is an ordinary `[compat]` bound, `TreeAMR =
-"0.2"` — the whole `0.2` series, not a pin to one release. A resolve
-takes the newest registered `0.2.x`, and the bound is raised only when
-this package comes to need something a newer one added, or when TreeAMR
-breaks its API in a new minor series. It was `"0.1.0"` until the
-diagnostics moved to `mesh_mapreduce`, which 0.1.2 added, and `"0.1.2"`
-until TreeAMR 0.2.0, whose only break moved the checkpoint functions
-out into the companion package TreeIOHDF5; nothing here writes
-checkpoints, so the change was the bound alone.
+TreeAMR is an ordinary `[compat]` bound, `TreeAMR = "0.2"` — the whole
+`0.2` series, not a pin to one release. A resolve takes the newest
+registered `0.2.x`, and the bound is raised only when this package comes
+to need something a newer one added, or when TreeAMR breaks its API in a
+new minor series. Its earlier values are in
+[HISTORY.md](HISTORY.md#the-treeamr-bound).
 
 That is still a moving target, and deliberately so; what changed is the
 size of the step. Development against a branch meant the mesh could move
@@ -1486,8 +1499,15 @@ application.
 
 One bound, in one file: `bin/` declares TreeAMR as an ordinary dependency
 with no bound of its own, and inherits this one through the `TreeWave`
-path source it already needs. Before, the version lived in two
-`[sources]` entries that had to be changed together.
+path source it already needs. The two branch pins it replaced are in
+[HISTORY.md](HISTORY.md#from-two-branch-pins-to-one-bound).
+
+Deleting a `[sources]` entry does not un-track the branch: `Pkg.resolve()`
+says "no packages added or removed" and leaves `repo-rev = "main"`
+sitting in the manifest. Both manifests are untracked, so CI resolves
+from scratch and never saw this; a working copy keeps building against
+the branch until someone frees it, which is the quiet way to measure a
+TreeAMR that is not the one CI measures.
 
 Visualization lives in `bin/` and not in the package because CairoMakie is
 a heavy dependency that nothing in `src/` needs. `bin/` carries its own
@@ -1495,7 +1515,10 @@ a heavy dependency that nothing in `src/` needs. `bin/` carries its own
 `julia --project=bin bin/visualize.jl` works from a fresh checkout. That
 path entry is the one real dependence on `[sources]` left, and it is
 why the viewer environment needs at least 1.11, which the package's
-floor of 1.13 more than covers.
+floor of 1.13 more than covers. `bin/benchmark.jl` is the exception: it
+runs against the root project, because asking a compute node to build
+Cairo in order to time a Laplacian would be absurd, and it is therefore
+not part of the viewer CI job.
 
 ## Measured results
 
@@ -1553,8 +1576,8 @@ than as a test that merely still passes.
   | 32 | 1/256 | 0.0049269 | 0.020605 | 0.0049269 | 0.020540 | 65536 |
 
   Rates 1.98 (L2) and 1.96 / 1.95 (L∞) — the quadrature is right to well
-  past what the scheme can see. (The 1.99 recorded here before was the
-  same 1.985, rounded the other way.)
+  past what the scheme can see. [HISTORY.md](HISTORY.md#the-blast-waves-l2-rate)
+  has the 1.99 recorded before.
 - Blast wave, adaptive (`N = 8`, cap 2) against those: L∞ 0.029104
   vertex-centred at 52480 points, so **10× better than uniform-coarse and
   1.41× worse than uniform-fine at 80% of its points**; cell-centred
@@ -1580,10 +1603,9 @@ than as a test that merely still passes.
   | 0.08, cell | 0.820 | 0.540 | **0.229** | 0.069 |
 
   The two layouts agree to 0.005 everywhere, so the calibration is not one
-  that had to be redone — but it had to be *re*measured to say so, and the
-  recipe is recorded here because the earlier entry did not state it and
-  reproducing it took a second attempt: it is the evolved solution at
-  `t_end`, not the initial data. (On the initial data the same table reads
+  that had to be redone. The recipe is the evolved solution at `t_end`,
+  not the initial data ([HISTORY.md](HISTORY.md#the-blast-waves-calibration-recipe)
+  has why it is written down). (On the initial data the same table reads
   0.65 / 0.32 / 0.11 / 0.03 at σ = 0.08, which is a different question and
   the wrong one for choosing σ.)
 
@@ -1623,21 +1645,12 @@ than as a test that merely still passes.
   `128²`, 29.4M points): **12.7× on the RHS path (16.7× with the pages
   interleaved), 3.6× on a whole RK4 step**, 38–48× on the compute-bound
   passes. The gap between the first two numbers is the integrator's serial
-  stage arithmetic, and it is 79% of a 64-thread step. Two entries here
-  changed and are flagged as such: interleaving the pages *does* help, and
-  the claim that it did not came from reading a pair of seconds the wrong
-  way round; and the refinement-flag pass now scales 3.4× where 33.9× was
-  recorded — measured to be equally true of the *pre-M8 code*, run beside
-  this one on the same node in the same job, so it is the machine and not
-  this work. The full table is under
+  stage arithmetic, and it is 79% of a 64-thread step. Interleaving the
+  pages *does* help, and the refinement-flag pass scales 3.4×; the two
+  figures these replaced are in [HISTORY.md](HISTORY.md#multi-threading).
+  The full table is under
   [Multi-threading](#multi-threading). `bin/benchmark.sbatch` reproduces
   the measurement.
-- The four loops that were this package's own to thread, at 8 threads on
-  a 12-core laptop and 1.8M cells: the Hankel table 0.98× → 6.1×, the
-  amplitude scales 1.01× → 4.1×, the coverage reduction → 1.8×, the
-  Hankel contraction 0.98× → 1.1×. The last two are memory-bound and
-  saturate; the numbers are recorded so that a future "why is this only
-  2×" has an answer already measured.
 - `RK4(thread = True())`, which threads the stage broadcasts through
   Polyester, measured **2.1× slower** than the default at 8 threads
   (0.030 s → 0.064 s per step): a second thread pool alongside the one

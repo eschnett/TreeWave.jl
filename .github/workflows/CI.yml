@@ -19,8 +19,8 @@ jobs:
       fail-fast: false
       matrix:
         # Julia 1.13 is the floor and the only version tested, with all
-        # the Tree* packages since 2026-10-16 ("File layout" in
-        # CODE.md has the history).
+        # the Tree* packages since 2026-10-16 ("The Julia floor" in
+        # HISTORY.md has the history).
         version: ["1.13"]
         os: [ubuntu-latest, macOS-latest]
         include:
