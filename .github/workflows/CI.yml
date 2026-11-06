@@ -56,8 +56,9 @@ jobs:
       COVERAGE: ${{ matrix.os == 'macOS-latest' && matrix.threads == 1 && github.event_name != 'pull_request' }}
       # Precompiled code is built for one fixed CPU per OS, not the
       # runner's own; see the viewer job below. `apple-m1` is the oldest
-      # Apple Silicon, which GitHub documents for every arm64 macOS label,
-      # so a cache built for it loads on whatever Apple CPU comes later.
+      # Apple Silicon: GitHub documents every arm64 macOS label as an M1,
+      # but has also run this cell on an M2 Pro, and a cache built for an
+      # M1 loads on any later Apple CPU.
       # The names are per architecture: `x86-64-v3` is an error on arm64.
       JULIA_CPU_TARGET: ${{ matrix.os == 'ubuntu-latest' && 'x86-64-v3' || 'apple-m1' }}
     steps:
