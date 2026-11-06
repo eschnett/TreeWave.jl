@@ -54,11 +54,12 @@ jobs:
     # under Julia 1.13 (TreeGeneralizedHarmonic's CI.yml has the probes).
     env:
       COVERAGE: ${{ matrix.os == 'macOS-latest' && matrix.threads == 1 && github.event_name != 'pull_request' }}
-      # Precompiled code for every Linux cell is built for one generic
-      # x86 CPU, not the runner's own; see the viewer job below.
-      # macOS runners all share one CPU, so `native` is fine there (an
-      # x86 target string would not even be valid on arm64).
-      JULIA_CPU_TARGET: ${{ matrix.os == 'ubuntu-latest' && 'x86-64-v3' || 'native' }}
+      # Precompiled code is built for one fixed CPU per OS, not the
+      # runner's own; see the viewer job below. `apple-m1` is the oldest
+      # Apple Silicon, which GitHub documents for every arm64 macOS label,
+      # so a cache built for it loads on whatever Apple CPU comes later.
+      # The names are per architecture: `x86-64-v3` is an error on arm64.
+      JULIA_CPU_TARGET: ${{ matrix.os == 'ubuntu-latest' && 'x86-64-v3' || 'apple-m1' }}
     steps:
       - uses: actions/checkout@v7
       - uses: julia-actions/setup-julia@v3

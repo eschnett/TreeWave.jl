@@ -368,7 +368,13 @@ have gone on being restored, then refused on a different CPU model.
 Since then the target is part of the cache key. The same logs also
 showed the macOS cell rebuilding all 111 packages after a cache hit
 (run 42271594359), with the same Julia and the same package versions.
-macOS keeps `native` for now; whether its runners differ too is open.
+GitHub documents every arm64 macOS label as an Apple M1, so that rebuild
+may have another cause; macOS was given `apple-m1` anyway, as the oldest
+Apple Silicon a cache could be loaded on. Checked locally on an M3 Pro
+with Julia 1.13.3: an invalid `JULIA_CPU_TARGET` fails precompilation
+outright, and a package built for `apple-m1` is loaded again, without
+rebuilding, under `apple-m1`, `apple-m4` and `native` alike, which is
+the same leniency the pull request's first run showed on Linux.
 
 Two smaller things turned up in the same logs. A push to `main` on
 2026-11-06 found no cache at all, because the last `main` caches dated

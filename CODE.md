@@ -1540,8 +1540,9 @@ of the TreeAMR dependency: during development that let the viewer keep
 building against an older TreeAMR than the tests, until it failed on an API
 the tests were already using. Nothing in the test job could have caught that.
 
-**The Linux jobs build precompiled code for one generic CPU**,
-`JULIA_CPU_TARGET=x86-64-v3` (AVX2 and FMA, which every runner has).
+**CI builds precompiled code for one fixed CPU per OS**:
+`JULIA_CPU_TARGET=x86-64-v3` on Linux (AVX2 and FMA, which every runner
+has) and `apple-m1` on macOS (the oldest Apple Silicon).
 GitHub's `ubuntu-latest` runners do not all have the same CPU, the cache
 key does not name one, and code built for `native` is refused by a runner
 with a different CPU. Julia then rebuilds everything, which for the
@@ -1555,9 +1556,10 @@ rebuilt anyway can be matched with the machine that saved it. The target
 is part of the cache key (`cache-name`): Julia does not refuse a cached
 file built for a different target as long as the CPU can run it, so
 without the key a change of target would go on restoring the old files.
-macOS keeps `native` **(open: its cell has rebuilt everything after a
-cache hit once too, and whether Linux cache hits now hold is still to be
-confirmed)**. The measurements are in
+macOS gets a fixed target too, although GitHub documents its arm64
+runners as all M1, because its cell has rebuilt everything after a cache
+hit once as well **(open: whether cache hits now hold, on either OS)**.
+The measurements are in
 [HISTORY.md](HISTORY.md#precompiled-code-and-mixed-runners).
 
 **No CI runner has a GPU**, so `test/device_tests.jl` runs there on the
