@@ -252,6 +252,14 @@ Match TreeAMR's style, since the two are read together:
   which run against `bin/Project.toml` and one against the root project. So
   it may use only what *both* environments have -- today that is
   `KernelAbstractions`, which is why it was added to `bin/Project.toml`.
+- **The viewers own their runs.** `sine`, `pulse` (`bin/visualize.jl`)
+  and `blast` (`bin/visualize2d.jl`) are copies of the loops in
+  `wave_errors`, `track_pulse` and `track_blast`, kept as examples of
+  driving the package from a script, with the command line in
+  `bin/options.jl` and the figures in `bin/figure1d.jl` and
+  `bin/figure2d.jl`. A change to a driver's run is a change to its
+  script too: nothing in the suite or CI compares them ("Driving a run
+  from a script").
 - `bin/output/` is gitignored; the viewer writes PNGs there.
 - `main` is committed and published: `origin` is
   `git@github.com:eschnett/TreeWave.jl.git`, and `main` tracks it. Work on a

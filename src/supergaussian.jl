@@ -79,7 +79,9 @@ The buffer width is derived from the pulse's motion by
 Pass `observer` to watch the run rather than only its outcome: it is
 called as `observer(fs, t, u)` once per chunk (and once at `t = 0`),
 after the data has been scattered into `fs` and before the regrid that
-would invalidate it. This is what the viewer in `bin/` uses.
+would invalidate it. The tests watch a run through it; the viewer in
+`bin/` makes this run itself instead (`CODE.md`, "Driving a run from a
+script").
 
 `T` is the floating-point type the run is computed in, defaulting to
 `Float64`. It is said once, to the forest, and reaches the field set, the

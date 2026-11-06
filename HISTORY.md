@@ -33,6 +33,8 @@ layouts — and, as its other half, conservation at coarse-fine faces
   - [The diagnostics move to `mesh_mapreduce`](#the-diagnostics-move-to-mesh_mapreduce)
   - [The diagnostics move to `mesh_fold`](#the-diagnostics-move-to-mesh_fold)
   - [M3 Pro timings before M8](#m3-pro-timings-before-m8)
+- [Driving a run from a script](#driving-a-run-from-a-script)
+  - [The viewers stopped watching through `observer`](#the-viewers-stopped-watching-through-observer)
 - [Measured results](#measured-results)
   - [The blast wave's L2 rate](#the-blast-waves-l2-rate)
 - [Dependencies and the Julia floor](#dependencies-and-the-julia-floor)
@@ -233,6 +235,39 @@ both layouts and on both backends — the eight-thread host column most of
 all (a `step` of 0.244 against 0.348). That is the machine and the Julia
 version, not the port: the cell-centred column *is* the pre-M8
 configuration, and it moved by the same amount.
+
+## Driving a run from a script
+
+### The viewers stopped watching through `observer`
+
+Until 2026-11-06 the viewers contained no time loop of their own. They
+called `wave_errors`, `track_pulse` and `track_blast` with an `observer`
+callback that built each frame, on the argument that three
+near-identical loops in `src/` were enough and a fourth in `bin/` would be
+the one to drift out of step.
+
+On 2026-11-06 Erik had the viewers rewritten in the form TreeGRRMHD's
+coupled runs take — a script owns the loop and the packages supply the
+pieces — so that they serve as good, simple examples of driving the
+package, with the command line and other incidental complexity kept apart
+from the run. The runs moved into `bin/visualize.jl` and
+`bin/visualize2d.jl`, the command line into `bin/options.jl` and the
+records and figures into `bin/figure1d.jl` and `bin/figure2d.jl`;
+`chunk_count` and `chunk_bounds` became `public`, and `bin/Project.toml`
+gained the two ODE packages. The drift is now a cost accepted rather than
+avoided, and the drivers keep `observer` for the tests.
+
+The runs did not change: each script's run was checked against its
+driver's, bit for bit, at every frame. Only the τ panels moved, because
+the record now draws the run's own τ. Through the observer, the 1D figure
+had drawn τ against scales re-measured at every frame and across ghosts
+left by the last RK stage, and the 2D figure against scales measured once
+more after the initial adaptation — under `--frozen-scales` frozen there,
+not where the run froze them. Of CI's eight figures, the three 1D pulse
+renders and the cell-centred blast wave differ in their τ panels and
+nowhere else; the other four are identical byte for byte. Two flags went:
+`--dim=`, which accepted only 1, and the 2D viewer's `--n=`, which the
+blast wave's exact solution rejects for anything but 1.
 
 ## Measured results
 
