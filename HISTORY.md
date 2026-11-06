@@ -42,6 +42,7 @@ layouts — and, as its other half, conservation at coarse-fine faces
   - [The TreeAMR bound](#the-treeamr-bound)
   - [From two branch pins to one bound](#from-two-branch-pins-to-one-bound)
   - [Two CI tiers](#two-ci-tiers)
+  - [Precompiled code and mixed runners](#precompiled-code-and-mixed-runners)
 
 ## Goals
 
@@ -337,3 +338,50 @@ matrix went to 1.13 alone (2026-10-16): with one version left, the
 threaded `include` entry, against a matrix with no `threads` key, merged
 into that cell instead of adding one, so CI ran macOS at one thread and
 Linux at four only. `threads: [1]` is now a key, and the entry adds the cell.
+
+### Precompiled code and mixed runners
+
+On 2026-11-06 Erik noticed that the figure job spent 4–7 min
+precompiling on every run, cache or no cache. The logs showed the cache
+restoring (259 MB, from the previous run) and Julia then rebuilding 352
+of the environment's 392 packages; the 40 that survived were the ones
+that ship precompiled with Julia. The same happened, intermittently, to
+the Linux test cells: in run 42248805669 the serial cell rebuilt 1
+package after its cache hit and the threaded cell rebuilt all 111, within
+minutes and with the same packages. The
+explanation that fits is that GitHub's `ubuntu-latest` runners have
+different x86 CPUs, Julia built precompiled code for `native` because
+`JULIA_CPU_TARGET` was unset, and the cache key names no CPU, so a cache
+saved on one CPU model was refused on another. Both Linux jobs now set
+`JULIA_CPU_TARGET=x86-64-v3` and print the runner's CPU, which was not
+logged before, so the explanation is not yet confirmed. The official
+x86_64 builds' list of targets (`generic;sandybridge,…;haswell,…;
+x86-64-v4,…`) was considered first and dropped: it compiles every
+package once per entry, for AVX-512 code that CI's timings do not need.
+
+The first run on the pull request (42274671921) rebuilt nothing: it
+restored the `native` caches saved by `main` and kept them, on both of
+the CPU models it got (AMD EPYC 9V74 and 7763). So Julia does not refuse
+a cached file for having been built for a different target, only for
+needing instructions the CPU running it lacks, and the old caches would
+have gone on being restored, then refused on a different CPU model.
+Since then the target is part of the cache key. The same logs also
+showed the macOS cell rebuilding all 111 packages after a cache hit
+(run 42271594359), with the same Julia and the same package versions.
+GitHub documents every arm64 macOS label as an Apple M1, so that rebuild
+may have another cause; macOS was given `apple-m1` anyway, as the oldest
+Apple Silicon a cache could be loaded on. Checked locally on an M3 Pro
+with Julia 1.13.3: an invalid `JULIA_CPU_TARGET` fails precompilation
+outright, and a package built for `apple-m1` is loaded again, without
+rebuilding, under `apple-m1`, `apple-m4` and `native` alike, which is
+the same leniency the pull request's first run showed on Linux.
+
+Two smaller things turned up in the same logs. A push to `main` on
+2026-11-06 found no cache at all, because the last `main` caches dated
+from 2026-10-26 and GitHub evicts a cache unused for seven days; the
+weekly schedule added the day before should keep them alive, with no
+margin, since the schedule's period equals the eviction window. And even
+on a cache that was accepted, Makie rebuilt (~190 s) whenever a
+dependency such as `ChainRulesCore` had a new release, since `bin/`'s
+`Manifest.toml` is not committed and CI resolves against the current
+registry.
