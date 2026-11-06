@@ -87,9 +87,10 @@ volume-weighted L2 and L∞ errors, plus the finest spacing.
 
 Pass `observer` to watch the run rather than only its outcome: it is
 called as `observer(fs, t, u)` at `nsnapshots` times spanning the run,
-with `fs` already scattered from `u`, which is what the viewer in `bin/`
-uses. Leaving it `nothing` keeps the cheap path — no intermediate
-solution is stored.
+with `fs` already scattered from `u`, so a test can watch a run without
+a loop of its own; the viewer in `bin/` makes this run itself instead
+(`CODE.md`, "Driving a run from a script"). Leaving it `nothing` keeps
+the cheap path — no intermediate solution is stored.
 
 `T` is the floating-point type the run is computed in, defaulting to
 `Float64`. Note that this case needs `sin` and `cos`, so it is not

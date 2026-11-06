@@ -67,6 +67,10 @@ export lohner, field_scales, cell_indicator, refine_mark, refine_flags,
 # Thread-scaling measurement
 export benchmark_phases, benchmark_driver
 
+# The regrid cadence, for a script that owns its loop (the viewers in
+# `bin/`); public rather than exported, so they are called qualified.
+public chunk_count, chunk_bounds
+
 include("precision.jl")
 include("device.jl")
 include("evolution.jl")

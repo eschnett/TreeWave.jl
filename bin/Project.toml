@@ -7,11 +7,15 @@
 # needs no source of its own: it is registered, and the version this
 # environment gets is decided by the root project's `[compat]` reached
 # through the `TreeWave` source -- so there is one bound, in one file,
-# and not two to keep in step.
+# and not two to keep in step. The same holds for the two ODE packages:
+# the viewers own their time loops and call the solver themselves, and
+# the versions are the ones the package's `[compat]` admits.
 
 [deps]
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
 KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
+OrdinaryDiffEqLowOrderRK = "1344f307-1e59-4825-a18e-ace9aa3fa4c6"
+SciMLBase = "0bca4576-84f4-4d90-8ffe-ffa030f20462"
 SixelTerm = "65edfddc-f399-4499-8369-a1bd38eee2ea"
 TreeAMR = "91bc416d-811c-44c1-9bc4-b9c8bbdbbd08"
 TreeWave = "6acacbb1-3a21-4f63-beb8-8f5fda648e50"

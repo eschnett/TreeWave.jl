@@ -49,7 +49,7 @@ milestones M5–M8, named below by number, were.
   - [What stays on the host, and why that is not a gap](#what-stays-on-the-host-and-why-that-is-not-a-gap)
   - [What it buys on this hardware, and what it does not](#what-it-buys-on-this-hardware-and-what-it-does-not)
   - [Reproducing it](#reproducing-it)
-- [Watching a run: the `observer` keyword](#watching-a-run-the-observer-keyword)
+- [Driving a run from a script](#driving-a-run-from-a-script)
 - [File layout](#file-layout)
 - [Measured results](#measured-results)
 - [Possible extensions](#possible-extensions)
@@ -1397,18 +1397,54 @@ can be told apart. Both viewers take `--backend=` and `--centering=` too,
 and that is the quickest way to see that a device run is the *same run*:
 same blocks, same levels, same τ, the same figure.
 
-## Watching a run: the `observer` keyword
+## Driving a run from a script
 
-`wave_errors` and `track_pulse` return summary numbers, which is what the
-tests want. The viewer wants the run itself, so both take an
-`observer=nothing` keyword, called as `observer(fs, t, u)` with `fs`
-already scattered from `u`: per chunk for `track_pulse` (before the regrid
-that would invalidate `fs`), and at `nsnapshots` times via `saveat` for
-`wave_errors`. Left `nothing`, neither stores an intermediate solution.
+The two viewers in `bin/` are also the examples of driving this package
+from a script. Each owns its run — the mesh, the time loop, the
+regrids — and calls TreeAMR, TreeWave and the ODE solver itself; nothing
+in the package drives. This is the form TreeGRRMHD's coupled runs take as well:
+a short script owns the loop and the packages supply the pieces.
 
-This is the alternative to the viewer re-implementing a driver. There are
-already three near-identical time-stepping loops in `src/`; a fourth in
-`bin/` would be the one that silently drifts out of step with the rest.
+`sine` and `pulse` in `bin/visualize.jl` and `blast` in
+`bin/visualize2d.jl` are the whole of each run, and they are what to
+read. Everything incidental is kept out of their way: the command line is
+in `bin/options.jl`, the device in `bin/backend.jl`, and what is recorded
+of a run and how it is drawn in `bin/figure1d.jl` and `bin/figure2d.jl`.
+The record is one call in the loop, `snapshot`, made after the ghost
+exchange and before the regrid.
+
+- **A static mesh needs no loop.** The sine mode is one `solve`, saved at
+  the snapshot times, and a frame is recorded from each saved state.
+- **An adaptive mesh is a loop of chunks**: solve one, record it, regrid,
+  and start the next from the new mesh — the restart of [Regridding:
+  restart per chunk](#regridding-restart-per-chunk). No regrid follows the
+  last chunk, so the mesh the figure draws is the one the run ended on.
+
+Each script's run is its driver's in `src/` — `wave_errors`,
+`track_pulse`, `track_blast` — bit for bit, because it makes the same
+calls in the same order. That was checked when the scripts took this form
+(2026-11-06): at every recorded frame the time, the block count and every
+owned value of `u` are identical, and so is every number the titles
+print, at `Float64` on both layouts and at `Float32`, the blast wave
+tracking and frozen. It is also the cost of the arrangement: the loops in
+`bin/` are copies of the ones in `src/`, nothing in the suite or in CI
+compares them since, and a change to a driver's run is a change to its
+script too. The drivers are what the tests measure; the scripts are what
+a reader copies.
+
+What the copy buys besides the example is a figure that draws what the
+run acted on. For the pulse and the blast wave the τ drawn is the
+criterion's own: the record is taken after the ghost exchange and
+against the scales the run flags with, frozen scales included.
+
+The drivers keep their `observer=nothing` keyword, called as
+`observer(fs, t, u)` with `fs` already scattered from `u`: per chunk for
+`track_pulse` and `track_blast` (before the regrid that would invalidate
+`fs`), and at `nsnapshots` times via `saveat` for `wave_errors`. The tests
+watch a run through it — `test/thread_workload.jl` digests the state at
+every chunk, and `test/device_tests.jl` compares a device run with the
+host run — without a loop of their own. Left `nothing`, no driver stores
+an intermediate solution.
 
 ## File layout
 
@@ -1434,8 +1470,11 @@ already three near-identical time-stepping loops in `src/`; a fourth in
 | `test/threading_tests.jl` | the answer does not move with the thread count |
 | `test/device_tests.jl` | the two forms of the criterion agree, the geometry follows the storage, and — with a device — a whole run reproduces the host run |
 | `test/thread_workload.jl` | not a test: the standalone run whose digests the above compares across thread counts |
-| `bin/visualize.jl` | CairoMakie viewer for the 1D cases (own environment; see `bin/Project.toml`) |
-| `bin/visualize2d.jl` | CairoMakie viewer for the blast wave — a different figure, not a flag on the other one |
+| `bin/visualize.jl` | CairoMakie viewer for the 1D cases, and the example of driving a run from a script: the sine mode's and the pulse's runs (own environment; see `bin/Project.toml`) |
+| `bin/visualize2d.jl` | CairoMakie viewer for the blast wave — a different figure, not a flag on the other one — and the blast wave's run |
+| `bin/options.jl` | the two viewers' command line, and the operators and ghost width `--ops=` means |
+| `bin/figure1d.jl` | the 1D viewer's record (`snapshot`) and figure |
+| `bin/figure2d.jl` | the 2D viewer's record (`snapshot`) and figure |
 | `bin/benchmark.jl` | the benchmark's CLI — the one script in `bin/` that uses the *package* environment, since it needs no CairoMakie |
 | `bin/benchmark.sbatch` | the thread and page-placement sweep; a SLURM job and an ordinary shell script at once |
 | `bin/backend.jl` | `--backend=`, shared by all three scripts: loads a device package on demand and runs the work in the world that load created |

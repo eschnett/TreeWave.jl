@@ -329,7 +329,9 @@ docstring merely asserting it.
 Pass `observer` to watch the run rather than only its outcome: it is
 called as `observer(fs, t, u)` once per chunk (and once at `t = 0`), after
 the data has been scattered into `fs` and before the regrid that would
-invalidate it. This is what the viewer in `bin/` uses.
+invalidate it. The tests watch a run through it; the viewer in `bin/`
+makes this run itself instead (`CODE.md`, "Driving a run from a
+script").
 
 `T` is the floating-point type the run is computed in, defaulting to
 `Float64`. The initial data needs only `exp`, so this case runs at a
@@ -432,7 +434,7 @@ function track_blast(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
         covered = min(covered, blast_coverage(fs))
 
         # The observer runs here, after the ghosts and the scales are the
-        # ones the flagging below will actually use, so a viewer drawing τ
+        # ones the flagging below will actually use, so an observer drawing τ
         # draws the value the mesh is about to act on -- and still before
         # the regrid that would invalidate `fs`.
         observer === nothing || observer(fs, t, sol.u[end])
