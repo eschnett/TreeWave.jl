@@ -369,12 +369,31 @@ Since then the target is part of the cache key. The same logs also
 showed the macOS cell rebuilding all 111 packages after a cache hit
 (run 42271594359), with the same Julia and the same package versions.
 GitHub documents every arm64 macOS label as an Apple M1, so that rebuild
-may have another cause; macOS was given `apple-m1` anyway, as the oldest
-Apple Silicon a cache could be loaded on. Checked locally on an M3 Pro
+looked as if it might have another cause; macOS was given `apple-m1`
+anyway, as the oldest Apple Silicon a cache could be loaded on. It turned
+out to be the same cause (below). Checked locally on an M3 Pro
 with Julia 1.13.3: an invalid `JULIA_CPU_TARGET` fails precompilation
 outright, and a package built for `apple-m1` is loaded again, without
 rebuilding, under `apple-m1`, `apple-m4` and `native` alike, which is
 the same leniency the pull request's first run showed on Linux.
+
+Run 42276620551 confirmed it on Linux. Its first attempt found no cache
+under the new key and rebuilt everything, on AMD EPYC 9V74 (viewer and
+threaded cell) and 9V45 (serial cell). The re-run restored those caches
+on an Intel Xeon Platinum 8573C (viewer), a 9V74 and a 9V45, and rebuilt
+nothing: the viewer's instantiate step took 7 s against 328 s, and the
+viewer job 5 m 29 in all.
+
+On `main`, after the merge, run 42282036280 confirmed it on both systems.
+Its first attempt found no cache, since `main` cannot read a pull
+request's caches, and rebuilt everything; its macOS cell, now printing
+its CPU, was an Apple M1 (Virtual). The re-run restored those caches and
+rebuilt nothing, on an Intel Xeon Platinum 8573C (viewer), AMD EPYC 9V74
+and 9V45, and, on macOS, an **Apple M2 Pro (Virtual)**. So GitHub's
+macOS runners are not all M1, whatever its documentation says, and a
+`native` cache built on one kind would be refused by the other, the
+likely explanation of the rebuild in run 42271594359, whose CPU was not
+logged.
 
 Two smaller things turned up in the same logs. A push to `main` on
 2026-11-06 found no cache at all, because the last `main` caches dated
