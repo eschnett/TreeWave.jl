@@ -1551,9 +1551,13 @@ the price is AVX-512 going unused on the runners that have it. A list
 of targets, as the official Julia builds use, would keep it, but builds
 every package once per entry. Each job prints
 its runner's CPU before the cache step, so a cache that was restored and
-rebuilt anyway can be matched with the machine that saved it. macOS
-runners share one CPU and keep `native` **(open: confirm on CI that
-Linux cache hits now hold)**. The measurements are in
+rebuilt anyway can be matched with the machine that saved it. The target
+is part of the cache key (`cache-name`): Julia does not refuse a cached
+file built for a different target as long as the CPU can run it, so
+without the key a change of target would go on restoring the old files.
+macOS keeps `native` **(open: its cell has rebuilt everything after a
+cache hit once too, and whether Linux cache hits now hold is still to be
+confirmed)**. The measurements are in
 [HISTORY.md](HISTORY.md#precompiled-code-and-mixed-runners).
 
 **No CI runner has a GPU**, so `test/device_tests.jl` runs there on the

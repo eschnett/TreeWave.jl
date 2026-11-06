@@ -73,7 +73,14 @@ jobs:
           else
             sysctl -n machdep.cpu.brand_string
           fi
+      # The CPU target is part of the key. Julia does not refuse a cached
+      # file built for a different target, as long as this runner's CPU
+      # can run it, so without this the caches saved before the target
+      # was set (built for `native`) would carry on being restored, and
+      # refused only when they landed on a different CPU model.
       - uses: julia-actions/cache@v3
+        with:
+          cache-name: julia-cache;workflow=${{ github.workflow }};job=${{ github.job }};cpu=${{ env.JULIA_CPU_TARGET }}
       - uses: julia-actions/julia-buildpkg@v1
       # `check_bounds: yes` is the action's default, but it is stated here
       # because the package now relies on it: the RHS kernel's reads are
@@ -145,7 +152,14 @@ jobs:
           else
             sysctl -n machdep.cpu.brand_string
           fi
+      # The CPU target is part of the key. Julia does not refuse a cached
+      # file built for a different target, as long as this runner's CPU
+      # can run it, so without this the caches saved before the target
+      # was set (built for `native`) would carry on being restored, and
+      # refused only when they landed on a different CPU model.
       - uses: julia-actions/cache@v3
+        with:
+          cache-name: julia-cache;workflow=${{ github.workflow }};job=${{ github.job }};cpu=${{ env.JULIA_CPU_TARGET }}
       - name: Instantiate the viewer environment
         run: julia --project=bin -e 'using Pkg; Pkg.instantiate()'
       - name: Render the 1D cases
