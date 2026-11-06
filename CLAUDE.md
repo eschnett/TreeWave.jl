@@ -139,6 +139,11 @@ Each is the rule; the `CODE.md` section named after it has the reason.
   rather than for the absence of an error ("File layout").
 - **The floor is Julia 1.13, and CI tests nothing else.** Do not add
   version checks or workarounds for older Julias ("File layout").
+- **A pull request's CI runs only the Linux cells**, without coverage;
+  macOS and coverage run on `main`, weekly and on dispatch, and
+  Markdown-only changes run nothing. So run the full suite locally before
+  opening a pull request: that is the macOS run the pull request does not
+  get ("File layout").
 - **The pulse's `∂ₜu` sign is load-bearing.** `u = G(x - t)` gives
   `∂ₜu = -G'` ("Travelling super-Gaussian pulse").
 - **The super-Gaussian order `n` is not free.** It defaults to 1. If you
