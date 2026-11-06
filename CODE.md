@@ -1540,6 +1540,22 @@ of the TreeAMR dependency: during development that let the viewer keep
 building against an older TreeAMR than the tests, until it failed on an API
 the tests were already using. Nothing in the test job could have caught that.
 
+**The Linux jobs build precompiled code for one generic CPU**,
+`JULIA_CPU_TARGET=x86-64-v3` (AVX2 and FMA, which every runner has).
+GitHub's `ubuntu-latest` runners do not all have the same CPU, the cache
+key does not name one, and code built for `native` is refused by a runner
+with a different CPU. Julia then rebuilds everything, which for the
+figure job means 4–7 minutes of Makie on a cache *hit*. A single target
+costs no more to build than `native` and keeps the cache the same size;
+the price is AVX-512 going unused on the runners that have it. A list
+of targets, as the official Julia builds use, would keep it, but builds
+every package once per entry. Each job prints
+its runner's CPU before the cache step, so a cache that was restored and
+rebuilt anyway can be matched with the machine that saved it. macOS
+runners share one CPU and keep `native` **(open: confirm on CI that
+Linux cache hits now hold)**. The measurements are in
+[HISTORY.md](HISTORY.md#precompiled-code-and-mixed-runners).
+
 **No CI runner has a GPU**, so `test/device_tests.jl` runs there on the
 CPU backend, which needs no device package and is the default. That is
 less of a gap than it sounds, because the assertion most worth guarding

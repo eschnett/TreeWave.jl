@@ -54,11 +54,25 @@ jobs:
     # under Julia 1.13 (TreeGeneralizedHarmonic's CI.yml has the probes).
     env:
       COVERAGE: ${{ matrix.os == 'macOS-latest' && matrix.threads == 1 && github.event_name != 'pull_request' }}
+      # Precompiled code for every Linux cell is built for one generic
+      # x86 CPU, not the runner's own; see the viewer job below.
+      # macOS runners all share one CPU, so `native` is fine there (an
+      # x86 target string would not even be valid on arm64).
+      JULIA_CPU_TARGET: ${{ matrix.os == 'ubuntu-latest' && 'x86-64-v3' || 'native' }}
     steps:
       - uses: actions/checkout@v7
       - uses: julia-actions/setup-julia@v3
         with:
           version: ${{ matrix.version }}
+      # Which CPU this runner has, so that a cache that was restored and
+      # then rebuilt anyway can be matched against the runner that saved it.
+      - name: Show the runner's CPU
+        run: |
+          if command -v lscpu >/dev/null; then
+            lscpu | grep -E '^(Model name|Flags)' | cut -c1-200
+          else
+            sysctl -n machdep.cpu.brand_string
+          fi
       - uses: julia-actions/cache@v3
       - uses: julia-actions/julia-buildpkg@v1
       # `check_bounds: yes` is the action's default, but it is stated here
@@ -104,11 +118,33 @@ jobs:
   viewer:
     name: Viewer (bin/)
     runs-on: ubuntu-latest
+    # GitHub's `ubuntu-latest` runners have different x86 CPUs, and
+    # Julia builds precompiled code for the CPU it is on (`native`) unless
+    # told otherwise. The cache key does not include the CPU, so a cache
+    # saved on one CPU model and restored on another was thrown away:
+    # 352 of 392 packages rebuilt after a cache hit (Makie alone takes
+    # ~165 s), while the 40 that survived were the ones shipped
+    # precompiled with Julia, which is not built for `native` either.
+    # `x86-64-v3` (AVX2, FMA; Haswell and later, every runner GitHub has)
+    # is one target, so a build costs what it did and the cache is no
+    # larger; code for it loads on any of the runners, at the price of
+    # not using AVX-512 where a runner has it.
+    env:
+      JULIA_CPU_TARGET: "x86-64-v3"
     steps:
       - uses: actions/checkout@v7
       - uses: julia-actions/setup-julia@v3
         with:
           version: "1.13"
+      # Which CPU this runner has, so that a cache that was restored and
+      # then rebuilt anyway can be matched against the runner that saved it.
+      - name: Show the runner's CPU
+        run: |
+          if command -v lscpu >/dev/null; then
+            lscpu | grep -E '^(Model name|Flags)' | cut -c1-200
+          else
+            sysctl -n machdep.cpu.brand_string
+          fi
       - uses: julia-actions/cache@v3
       - name: Instantiate the viewer environment
         run: julia --project=bin -e 'using Pkg; Pkg.instantiate()'
