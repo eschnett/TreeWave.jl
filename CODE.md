@@ -1558,7 +1558,9 @@ file built for a different target as long as the CPU can run it, so
 without the key a change of target would go on restoring the old files.
 macOS gets a fixed target too, although GitHub documents its arm64
 runners as all M1, because its cell has rebuilt everything after a cache
-hit once as well **(open: whether cache hits now hold, on either OS)**.
+hit once as well. On Linux the cache now holds across CPU models,
+Intel and AMD included; macOS is checked only on `main` **(open: whether
+its cache hits now hold)**.
 The measurements are in
 [HISTORY.md](HISTORY.md#precompiled-code-and-mixed-runners).
 

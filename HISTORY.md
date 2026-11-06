@@ -376,6 +376,13 @@ outright, and a package built for `apple-m1` is loaded again, without
 rebuilding, under `apple-m1`, `apple-m4` and `native` alike, which is
 the same leniency the pull request's first run showed on Linux.
 
+Run 42276620551 confirmed it on Linux. Its first attempt found no cache
+under the new key and rebuilt everything, on AMD EPYC 9V74 (viewer and
+threaded cell) and 9V45 (serial cell). The re-run restored those caches
+on an Intel Xeon Platinum 8573C (viewer), a 9V74 and a 9V45, and rebuilt
+nothing: the viewer's instantiate step took 7 s against 328 s, and the
+viewer job 5 m 29 in all.
+
 Two smaller things turned up in the same logs. A push to `main` on
 2026-11-06 found no cache at all, because the last `main` caches dated
 from 2026-10-26 and GitHub evicts a cache unused for seven days; the
