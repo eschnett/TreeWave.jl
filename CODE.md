@@ -1439,7 +1439,7 @@ already three near-identical time-stepping loops in `src/`; a fourth in
 | `bin/benchmark.jl` | the benchmark's CLI — the one script in `bin/` that uses the *package* environment, since it needs no CairoMakie |
 | `bin/benchmark.sbatch` | the thread and page-placement sweep; a SLURM job and an ordinary shell script at once |
 | `bin/backend.jl` | `--backend=`, shared by all three scripts: loads a device package on demand and runs the work in the world that load created |
-| `.github/workflows/CI.yml` | tests on a Julia matrix, at one thread and at four, plus a job that renders the figures on both layouts; coverage is collected and uploaded from the single-threaded cells only |
+| `.github/workflows/CI.yml` | tests at one thread and at four, on Linux for a pull request and on macOS too for `main`, plus a job that renders the figures on both layouts; coverage is collected and uploaded from the serial macOS cell only, off pull requests |
 
 `bin/visualize.jl` draws four panels per 1D case — the solution, the
 pointwise error in `u`, the indicator τ, and the volume-weighted L2/L∞
@@ -1482,8 +1482,12 @@ The tests are ported from TreeAMR's own `test/wave_tests.jl`, minus its
 `scatter!`/`gather!` contract rather than anything about the wave
 equation, and belongs upstream where it already lives.
 
-CI runs the test suite on Julia 1.13, on Linux and macOS, and
-separately renders all three figures — plus the pulse at `Float32`, whose
+CI runs the test suite on Julia 1.13 in two tiers, the same in every
+Tree* repository: a pull request runs the Linux cells only, without
+coverage, since the author's own run before it is a macOS one; a push to
+`main`, a weekly schedule and a manual dispatch add the macOS cell and
+its coverage. Markdown and `docs/` changes run no CI, and tags are not
+tested. CI also separately renders all three figures — plus the pulse at `Float32`, whose
 conversions the default render does not exercise, and all three again
 cell-centred, which is the one comparison where something visibly moves
 and the only check that both viewers' geometry still comes from

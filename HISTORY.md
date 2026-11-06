@@ -39,6 +39,7 @@ layouts — and, as its other half, conservation at coarse-fine faces
   - [The Julia floor](#the-julia-floor)
   - [The TreeAMR bound](#the-treeamr-bound)
   - [From two branch pins to one bound](#from-two-branch-pins-to-one-bound)
+  - [Two CI tiers](#two-ci-tiers)
 
 ## Goals
 
@@ -285,3 +286,19 @@ entries that had to be changed together: two `rev = "main"` pins, one in
 the root `Project.toml` and one in `bin/Project.toml`, and the standing
 hazard was updating the first and leaving the viewer resolving a branch
 that no longer existed. Both are gone.
+
+### Two CI tiers
+
+On 2026-11-05 Erik moved all eight Tree* repositories to two CI tiers at
+once; TreeAMR's `HISTORY.md` ("Development environment and CI") has the
+measurements across them. A pull request runs the Linux cells only,
+uninstrumented; a push to `main`, a weekly schedule and a manual dispatch
+add the macOS cell and its coverage; Markdown and `docs/` changes and
+tags run nothing. The suite itself took 3–6 min here, so the gain is the
+skipped runs (24 of the last 33 commits on `main` touched only Markdown)
+and the macOS slots the account shares across the repositories. The
+change also found that the serial Linux cell had not run since the
+matrix went to 1.13 alone (2026-10-16): with one version left, the
+threaded `include` entry, against a matrix with no `threads` key, merged
+into that cell instead of adding one, so CI ran macOS at one thread and
+Linux at four only. `threads: [1]` is now a key, and the entry adds the cell.
