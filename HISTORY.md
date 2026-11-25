@@ -25,6 +25,7 @@ layouts — and, as its other half, conservation at coarse-fine faces
   - [What the M8 port changed](#what-the-m8-port-changed)
 - [Patches](#patches)
   - [M20 step 3: the annulus](#m20-step-3-the-annulus)
+  - [M20 step 5: the seven-patch ball](#m20-step-5-the-seven-patch-ball)
 - [The refinement criterion](#the-refinement-criterion)
   - [The blast wave's calibration recipe](#the-blast-waves-calibration-recipe)
 - [Multi-threading](#multi-threading)
@@ -138,6 +139,28 @@ TreeMultiPatch is not registered yet, so `Project.toml` and
 `test/Project.toml` reach it through a `[sources]` path, relative to this
 branch's worktree. Registering it is M20's step 6, after which the path
 gives way to a `[compat]` bound like TreeAMR's.
+
+### M20 step 5: the seven-patch ball
+
+Step 5, 2026-11-24, ahead of step 2 as step 3 was: a plane wave on the
+seven-patch ball, interpolated across every glue with closed ownership
+and the appendix, TreeAMR's M20 step 4, which is not released yet, so
+`[sources]` names TreeAMR's M20 checkout on this branch. The right-hand
+side gained the appendix, Kreiss–Oliger dissipation of the scheme's
+order plus one, and a boundary hook that follows the time; the ball
+gained the energy and volume by each patch's trapezoidal rule and the
+symmetry measurement ([CODE.md](CODE.md#the-seven-patch-ball-srcballjl)).
+PLAN.md's criteria, and where each is met: the L2 error and the L∞ error
+near the glues converge at second order, 2.02 and 2.21 without
+dissipation, faster at `ε = 1/2` where the dissipation's third-order
+error dominates (`ball_tests.jl`); the energy of the closed ball falls
+monotonically over 33 crossings at `ε = 1/2`; the volume from the
+quadrature converges at 2.00; a solution and its image under point
+inversion evolve into each other's images to rounding; and the
+difference from the mirror image, measured, is rounding as well, at
+7.4e−16, as TreeAMR's prototype found for closed ownership. Unlike the
+prototype's fourth-order scheme, this one was stable at `ε = 0.1`; at
+`ε = 0` it was not.
 
 ## The refinement criterion
 

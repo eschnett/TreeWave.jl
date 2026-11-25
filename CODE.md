@@ -29,6 +29,7 @@ milestones M5–M8, named below by number, were.
 - [Patches](#patches)
   - [The Laplacian through the metric](#the-laplacian-through-the-metric)
   - [The rotating Bessel mode on the annulus](#the-rotating-bessel-mode-on-the-annulus-srcannulusjl)
+  - [The seven-patch ball](#the-seven-patch-ball-srcballjl)
 - [Precision](#precision)
   - [The rule](#the-rule)
   - [Base does not come along](#base-does-not-come-along)
@@ -532,14 +533,18 @@ TreeMultiPatch's alignment of the maps are written for, and the metric
 here is placed at vertices. `PatchWaveProblem` refuses any other set.
 Erik's decision, so that the patch systems do not double the studies.
 
-**Step 3: the annulus, copied ghosts.** The annulus's glues are
-identities and its maps join smoothly, `θ` linear through every glue, so
-a ghost copied across a glue sits where the target patch's own map, extended
+**Copied or interpolated ghosts.** The annulus's glues are identities
+and its maps join smoothly, `θ` linear through every glue, so a ghost
+copied across a glue sits where the target patch's own map, extended
 past its box, puts it: the copy *is* the interpolation, and TreeAMR's
-copied ghosts are enough. The balls are not like that, and need the
-interpolated ghosts of TreeAMR's M20 (`glue = :interpolate`) and the
-appendix of points their closed ownership adds; that is the next step,
-not this one.
+copied ghosts are enough. The seven-patch ball's maps join at kinks, so
+there a copied ghost would make the stencil differentiate a kink; the
+ball's state is a field set interpolated across its glues (TreeAMR's
+`glue = :interpolate`), whose ghosts across a glue are Lagrange
+interpolants in the patch across at the point the target's own map
+names, and which owns every glued face point on each patch holding it,
+the high glued face planes following the cores as the state's appendix
+(TreeAMR's `CODE.md`, "Finite differences across a glue").
 
 ### The Laplacian through the metric
 
@@ -557,6 +562,35 @@ annulus the coordinates are orthogonal and the cross terms vanish; on a
 ball's shells they do not. The kernel is `wave_rhs_kernel!` with the
 metric's coefficients, and `wave_rhs!` takes a `PatchWaveProblem` as it
 takes a `WaveProblem`.
+
+**The appendix.** On a set interpolated across a glue the kernel is
+launched with `map_blocks!(…; appendix = true)`, over the closed range,
+and writes through `statearray(du, fs; appendix = true)`, TreeAMR's
+`AppendixArray`: a point on a high glued face plane the block owns is
+evolved like any other, with its own patch's stencil, which reads one
+plane of ghosts beyond it, and a point the block does not own is skipped
+by asking `isowned`. On a set without an appendix the same call is the
+owned range and the cores' array, so the annulus and the ball share the
+kernel.
+
+**Dissipation.** `PatchWaveProblem` takes a Kreiss–Oliger coefficient
+`ε` with no default: both variables get `-(ε/16h) Σ_a δ_a⁴ w`, fourth
+differences in logical coordinates over the logical spacing, one order
+above the scheme's, as TreeGeneralizedHarmonic scales its own. It reads
+two points out, so a nonzero `ε` needs `G = 2`. The annulus runs without
+it. The seven-patch ball needs it where three patches meet, which have a
+spatial instability that TreeAMR's prototype of the coupling found
+damped at `ε = 1/2` and not by a smaller time step (TreeAMR's
+`HISTORY.md`, M20), for a fourth-order scheme with 6-point ghosts. This
+second-order scheme with 4-point ghosts was stable at `ε = 0.1` too and
+not at `0`; the ball runs at `1/2`, the step's setting. Its error is
+`O(εh³)`, above the scheme's at coarse resolutions (Measured results).
+
+**Outer faces** are TreeAMR's boundary hook. `PatchWaveProblem`'s
+`boundary` is a function of the time returning the `CellBoundary` that
+`fill_ghosts!` takes, so that Dirichlet data can follow an exact
+solution; the hook fills the outer face's plane, which is not owned, and
+the ghosts beyond it.
 
 **The metric is a field set, filled everywhere.** `√g`, the `D(D+1)/2`
 coefficients `A^{ab}` and the largest logical speed of light
@@ -605,6 +639,47 @@ weighting goes through the norm TreeAMR has: the square root of `√g` at
 each owned point as a state vector `w`, and `‖w e‖/‖w‖`, the mean of `√g
 e²` over the mean of `√g`. Its numbers are under
 [Measured results](#measured-results).
+
+### The seven-patch ball ([`src/ball.jl`](src/ball.jl))
+
+TreeMultiPatch's `SevenPatchBall(Lc, R1, roots)`: the cube `[-Lc, Lc]³`
+and six shells over its faces reaching the sphere `|x| = R1`, glued to
+each other by quarter turns and to the cube by the identity or a
+reversal, with three shells at every corner of the cube's edges. The
+cube's and the shells' maps meet at kinks, so the state is interpolated
+across every glue: `ball_problem` builds it at `G = 2`, with Lagrange
+ghosts of order `glue = 4`, exact to degree 3, which is what a second
+derivative of order 2 needs and what TreeAMR's `k ≤ 2(G + 1)` allows,
+and with `ε = 1/2`.
+
+**The plane wave**, `u = sin(k ⋅ x − |k|t + φ)`, crosses every glue and
+is its own Dirichlet data on the outer sphere (`PlaneWaveHook`), the
+solution TreeWaveOLDG measures the ball with. `ball_errors` returns the
+`√g`-weighted L2 error, through TreeAMR's norm, which counts each
+physical point once, the L∞ error, and the L∞ error within two spacings
+of a glued face, where an interpolated ghost, a patch corner or an
+appendix plane would show first.
+
+**The energy and the volume.** `patch_quadrature` sums over each patch's
+closed box with the trapezoidal rule in its logical coordinates, so a
+point on a glued face is split between the patches holding it and the
+outer sphere's plane, the hook's, is included; host and serial, as a
+measurement. Its quadrature of `√g` is the ball's physical volume to
+second order (`patch_volume`), and `patch_energy` is `½ Σ w (√g v² +
+A^{ab} D_a u D_b u)` with centered first differences. TreeAMR's folds
+count each point once at one patch's copy instead, which is a count and
+not a quadrature; a volume needs the scheme's weights, which is why the
+energy is the application's. `ball_energies` follows random data on the
+closed ball, `u = v = 0` beyond the sphere, over many crossing times.
+
+**Symmetry.** Point inversion and the mirror `x₁ → −x₁` each map the
+ball onto itself, patch to patch and node to node (`ball_image`), and
+`ball_asymmetry` evolves random data and its image and compares the
+image of the one with the other, each copy of a glued face point with
+the copy its image is. Under closed ownership each copy is evolved by
+its own patch's stencil, and both symmetries hold to rounding — the
+mirror too, though it turns the shells' quarter turns the other way, as
+TreeAMR's prototype found for closed ownership.
 
 ## Precision
 
@@ -1556,8 +1631,9 @@ an intermediate solution.
 | `src/supergaussian.jl` | the travelling pulse, its AMR driver, and the uniform reference |
 | `src/blast.jl` | the radial blast wave, its Hankel-quadrature exact solution, its AMR driver, and the uniform reference |
 | `src/benchmark.jl` | per-phase and end-to-end timings, for the thread-scaling measurement |
-| `src/patches.jl` | the wave equation on patches: the metric set, `fill_stored!`, the patch RHS kernel, `PatchWaveProblem`, `patch_timestep` — see Patches |
+| `src/patches.jl` | the wave equation on patches: the metric set, `fill_stored!`, the patch RHS kernel with its appendix and dissipation, `PatchWaveProblem`, `patch_timestep` — see Patches |
 | `src/annulus.jl` | the rotating Bessel mode on the four-patch annulus, its wavenumber, forest and convergence driver |
+| `src/ball.jl` | the plane wave on the seven-patch ball, its convergence driver, the patches' quadrature, energy and volume, and the symmetry measurement |
 | `test/sinewave_tests.jl` | convergence order, the interface-order rule, the stagger's two consequences, 3D smoke test, energy drift |
 | `test/refinement_tests.jl` | claims about the indicator itself |
 | `test/supergaussian_tests.jl` | a moving refined region tracks the pulse |
@@ -1566,6 +1642,7 @@ an intermediate solution.
 | `test/supergaussian_cell_tests.jl` | " |
 | `test/blast_cell_tests.jl` | " |
 | `test/patch_tests.jl` | the metric at every stored point, second-order convergence of the patch Laplacian on the annulus and the seven-patch ball, the Bessel mode's convergence, the refusal of a cell-centred set |
+| `test/ball_tests.jl` | the ball's volume by the quadrature, the plane wave's convergence with and without dissipation, inversion and mirror symmetry to rounding, the closed ball's energy, the refusal of dissipation at `G = 1` |
 | `test/type_tests.jl` | the drivers at `Float32` and at MultiFloats' `Float32x2` — see Precision |
 | `test/threading_tests.jl` | the answer does not move with the thread count |
 | `test/device_tests.jl` | the two forms of the criterion agree, the geometry follows the storage, and — with a device — a whole run reproduces the host run |
@@ -1738,6 +1815,25 @@ than as a test that merely still passes.
   rate 1.95, L∞ 1.94. Over 300 time units at `N = 16`, about 130 times
   the quarter turn, the L2 error grows to 0.13, linearly, as the phase
   error does.
+- The seven-patch ball, `Lc = 1`, `R1 = 3`, one root a patch, `G = 2`,
+  4-point ghosts across the glues, `cfl = 1/4`. Volume by the scheme's
+  quadrature at `N = 8, 16, 32, 64`: relative errors −6.0e−3, −1.5e−3,
+  −3.7e−4, −9.4e−5, rate 2.00. The plane wave `k = (1.1, −0.7, 0.5)`,
+  `φ = 0.3`, to `t = 1`, `h` the cube's spacing: without dissipation L2
+  0.0153, 0.00377, 0.000938 at `N = 8, 16, 32` (rates 2.02, 2.01), L∞
+  0.081, 0.0197, 0.0052, L∞ within two spacings of a glue 0.081, 0.0175,
+  0.0039 (2.21, 2.16); at `ε = 1/2`, L2 0.0459, 0.00884, 0.00146,
+  0.000276 at `N = 8 … 64` (ratios 5.2, 6.0, 5.3), L∞ near the glues
+  0.154, 0.0241, 0.00375, 0.00083 (6.4, 6.4, 4.5), the dissipation's
+  third-order error above the scheme's and fading towards rate 2. The
+  closed ball, random data, `u = v = 0` beyond the sphere: at `ε = 1/2`
+  the energy falls at every sample to `t = 200`, about 33 crossings of
+  the diameter, to 6.5e−6 (`N = 8`) and 8.2e−6 (`N = 16`) of its start;
+  at `N = 16` so it does at `ε = 0.2` and `ε = 0.1` to `t = 100`, and
+  without dissipation it grows by 1.3e27 by `t = 50`. Inversion and the
+  mirror `x₁ → −x₁`: the largest difference between a run and its image
+  7.8e−16 at `N = 8`, `t = 2`, and 6.0e−16 and 7.4e−16 at `N = 16`,
+  `t = 10`, against values up to 0.41: rounding.
 - Sine mode, two-level mesh, order-4 operators: L2 and L∞ rates both 2.0
   (D = 1, 2), at `G = 1` vertex-centred and `G = 2` cell-centred.
   Vertex-centred L2 rates 1.99 (D = 1) and 1.99 (D = 2); cell-centred the

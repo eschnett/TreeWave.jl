@@ -32,7 +32,7 @@ end
     forest = annulus_forest(layout; N=4)
     fs = FieldSet(forest, 2; G=1, centering=vertexcentered(2),
                   parity=TreeWave.ANNULUS_PARITY)
-    p = PatchWaveProblem(fs, nothing, layout)
+    p = PatchWaveProblem(fs, nothing, layout; dissipation=0)
     m = p.metric.work
     worst = 0.0
     for b in 1:nblocks(fs), I in CartesianIndices(size(m)[1:2])
@@ -66,7 +66,7 @@ end
             forest = D == 2 ? annulus_forest(layout; N=N) : layout_forest(layout; N=N)
             fs = FieldSet(forest, 2; G=1, centering=vertexcentered(D),
                           parity=D == 2 ? TreeWave.ANNULUS_PARITY : nothing)
-            p = PatchWaveProblem(fs, nothing, layout)
+            p = PatchWaveProblem(fs, nothing, layout; dissipation=0)
             fill_stored!((ξ, q) -> (f(ξ, q), 0.0), fs, block_patches(forest))
             du = statevector(fs)
             TreeWave.patch_rhs!(du, p)
@@ -99,5 +99,5 @@ end
     forest = annulus_forest(layout; N=4)
     fs = FieldSet(forest, 2; G=1, centering=cellcentered(2),
                   parity=TreeWave.ANNULUS_PARITY)
-    @test_throws "vertex-centred only" PatchWaveProblem(fs, nothing, layout)
+    @test_throws "vertex-centred only" PatchWaveProblem(fs, nothing, layout; dissipation=0)
 end

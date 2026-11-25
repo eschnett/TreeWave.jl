@@ -168,6 +168,10 @@ Each is the rule; the `CODE.md` section named after it has the reason.
 - **Patches are vertex-centred only**, by Erik's decision: there is no
   cell-centred comparison on patches, unlike the flat box, and
   `PatchWaveProblem` refuses one ("Patches").
+- **On the ball the right-hand side covers the appendix**:
+  `map_blocks!(…; appendix = true)` through `statearray(du, fs; appendix
+  = true)`, and a nonzero dissipation needs `G = 2` ("The seven-patch
+  ball").
 - **The metric is filled at every stored point, never exchanged**:
   `fill_stored!`, not `fill_by_coordinates!`, which fills the owned
   points only ("The Laplacian through the metric").
@@ -272,10 +276,13 @@ Match TreeAMR's style, since the two are read together:
   script too: nothing in the suite or CI compares them ("Driving a run
   from a script").
 - `bin/output/` is gitignored; the viewer writes PNGs there.
-- **TreeMultiPatch is not registered yet**: `Project.toml` and
-  `test/Project.toml` reach it through a `[sources]` path relative to the
-  worktree, until its registration (TreeAMR's M20, step 6) replaces the
-  path by a `[compat]` bound.
+- **TreeMultiPatch is not registered yet, and the ball needs an
+  unreleased TreeAMR**: on this branch `Project.toml` and
+  `test/Project.toml` reach both through `[sources]` paths relative to
+  the worktree, TreeAMR's to its M20 checkout. TreeAMR's M20 step 6
+  releases TreeAMR and registers TreeMultiPatch, after which both paths
+  give way to `[compat]` bounds and the rule above, TreeAMR from the
+  registry, holds again.
 - `main` is committed and published: `origin` is
   `git@github.com:eschnett/TreeWave.jl.git`, and `main` tracks it. Work on a
   branch; do not push, open a pull request, or merge to `main` without being

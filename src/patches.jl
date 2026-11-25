@@ -91,46 +91,71 @@ end
 # three-point stencil with `A^{aa}` averaged to the half points; the cross
 # terms, `a ≠ b`, are centered differences of centered differences, which
 # read the edge ghosts `c ± e_a ± e_b`. Both are second order; on the
-# annulus the cross terms vanish. `@inbounds` as in `wave_rhs_kernel!`:
-# the stencil reaches one point past `c` in each dimension, and `G = 1`
-# puts it there.
+# annulus the cross terms vanish. With `ε ≠ 0` both variables get
+# Kreiss–Oliger dissipation of the scheme's order, `-(ε/16h) Σ_a δ_a⁴ w`,
+# which reads two points out and needs `G ≥ 2`.
+#
+# On a set interpolated across a glue the launch covers the closed range
+# and `du` is TreeAMR's `AppendixArray`, which keeps the high glued face
+# planes a block owns and drops the rest; `isowned` skips those. On any
+# other set `du` is the cores' array and the range the owned one.
+# `@inbounds` as in `wave_rhs_kernel!`: the stencil reaches `1 + (ε ≠ 0)`
+# points past `c`, at most `N + 1 + G` along a dimension, which `G` puts
+# within the stored array.
 @kernel function patch_wave_rhs_kernel!(du, @Const(work), @Const(metric),
-                                        @Const(spacings), ::Val{D},
+                                        @Const(spacings), ε, ::Val{D},
                                         ::Val{G}) where {D,G}
     I = @index(Global, NTuple)                 # (i1..iD, block)
     b = I[D + 1]
     inner = ntuple(d -> I[d], Val(D))          # state-layout index
     c = ntuple(d -> I[d] + G[d], Val(D))       # working-array index
 
-    @inbounds u0 = work[c..., 1, b]
-    flux = zero(eltype(du))
-    @inbounds for a in 1:D
-        up = Base.setindex(c, c[a] + 1, a)
-        um = Base.setindex(c, c[a] - 1, a)
-        k = metric_index(a, a, Val(D))
-        A0 = metric[c..., k, b]
-        Ap = (A0 + metric[up..., k, b]) / 2
-        Am = (A0 + metric[um..., k, b]) / 2
-        flux += Ap * (work[up..., 1, b] - u0) - Am * (u0 - work[um..., 1, b])
-        for e in 1:D
-            e == a && continue
-            k = metric_index(min(a, e), max(a, e), Val(D))
-            δp = work[Base.setindex(up, up[e] + 1, e)..., 1, b] -
-                 work[Base.setindex(up, up[e] - 1, e)..., 1, b]
-            δm = work[Base.setindex(um, um[e] + 1, e)..., 1, b] -
-                 work[Base.setindex(um, um[e] - 1, e)..., 1, b]
-            flux += (metric[up..., k, b] * δp - metric[um..., k, b] * δm) / 4
+    if isowned(du, inner..., 1, b)
+        @inbounds u0 = work[c..., 1, b]
+        flux = zero(eltype(du))
+        @inbounds for a in 1:D
+            up = Base.setindex(c, c[a] + 1, a)
+            um = Base.setindex(c, c[a] - 1, a)
+            k = metric_index(a, a, Val(D))
+            A0 = metric[c..., k, b]
+            Ap = (A0 + metric[up..., k, b]) / 2
+            Am = (A0 + metric[um..., k, b]) / 2
+            flux += Ap * (work[up..., 1, b] - u0) - Am * (u0 - work[um..., 1, b])
+            for e in 1:D
+                e == a && continue
+                k = metric_index(min(a, e), max(a, e), Val(D))
+                δp = work[Base.setindex(up, up[e] + 1, e)..., 1, b] -
+                     work[Base.setindex(up, up[e] - 1, e)..., 1, b]
+                δm = work[Base.setindex(um, um[e] + 1, e)..., 1, b] -
+                     work[Base.setindex(um, um[e] - 1, e)..., 1, b]
+                flux += (metric[up..., k, b] * δp - metric[um..., k, b] * δm) / 4
+            end
         end
+        @inbounds h = spacings[b]
+        @inbounds J = metric[c..., 1, b]
+        @inbounds v0 = work[c..., 2, b]
+        du_u = v0
+        du_v = flux / (J * h * h)
+        if !iszero(ε)
+            σ = ε / (16 * h)
+            @inbounds for a in 1:D
+                c1 = Base.setindex(c, c[a] + 1, a)
+                c2 = Base.setindex(c, c[a] + 2, a)
+                m1 = Base.setindex(c, c[a] - 1, a)
+                m2 = Base.setindex(c, c[a] - 2, a)
+                du_u -= σ * (work[c2..., 1, b] - 4 * work[c1..., 1, b] + 6 * u0 -
+                             4 * work[m1..., 1, b] + work[m2..., 1, b])
+                du_v -= σ * (work[c2..., 2, b] - 4 * work[c1..., 2, b] + 6 * v0 -
+                             4 * work[m1..., 2, b] + work[m2..., 2, b])
+            end
+        end
+        @inbounds du[inner..., 1, b] = du_u
+        @inbounds du[inner..., 2, b] = du_v
     end
-    @inbounds h = spacings[b]
-    @inbounds J = metric[c..., 1, b]
-
-    @inbounds du[inner..., 1, b] = work[c..., 2, b]
-    @inbounds du[inner..., 2, b] = flux / (J * h * h)
 end
 
 """
-    PatchWaveProblem(fs, schedule, layout)
+    PatchWaveProblem(fs, schedule, layout; dissipation, boundary=nothing)
 
 Everything the right-hand side on a forest of patches needs, built once:
 the state's vertex-centred field set `fs` (`u` and `v`) and its ghost
@@ -142,21 +167,35 @@ every stored point from the maps (`fill_stored!`), ghosts included, since
 the stencil reads it there and the maps are defined past each box; it is
 not exchanged.
 
+`dissipation` is the Kreiss–Oliger coefficient `ε`, with no default:
+`0` for none, as on the annulus, while the seven-patch ball's corners,
+where three patches meet, need `ε = 1/2` (TreeAMR's M20). A nonzero `ε`
+needs `G ≥ 2`. `boundary` is `nothing` for a forest without outer faces,
+or a function of the time returning the `boundary` that `fill_ghosts!`
+takes, a `CellBoundary`, for the hook that fills them.
+
+`fs` may be interpolated across a glue (`glue = :interpolate`), as on a
+ball: the right-hand side then covers the appendix, the glued high face
+planes each patch owns.
+
 [`wave_rhs!`](@ref) takes it as it takes a [`WaveProblem`](@ref), and
 [`patch_timestep`](@ref) gives its time step. The layout's maps are
 evaluated once, here; a regrid would need a new problem.
 """
-struct PatchWaveProblem{T,D,G,F,S,M,V,L}
+struct PatchWaveProblem{T,D,G,F,S,M,V,L,B}
     fs::F
     schedule::S
     metric::M
     spacings::V
     layout::L
+    ε::T
+    boundary::B
     valD::Val{D}
     valG::Val{G}
 end
 
-function PatchWaveProblem(fs::FieldSet{T,D}, schedule, layout) where {T,D}
+function PatchWaveProblem(fs::FieldSet{T,D}, schedule, layout; dissipation,
+                          boundary=nothing) where {T,D}
     all(==(1), staggers(fs)) || throw(ArgumentError(
         "the wave equation on patches is vertex-centred only: a glued face is a " *
         "vertex plane, and the cell-centred comparison of the flat box has no " *
@@ -164,6 +203,12 @@ function PatchWaveProblem(fs::FieldSet{T,D}, schedule, layout) where {T,D}
     all(>=(1), fs.G) || throw(ArgumentError(
         "the patch Laplacian reads one point past each owned one, and its cross " *
         "terms the edge ghosts, so it needs G ≥ 1, got $(fs.G)"))
+    dissipation >= 0 || throw(ArgumentError(
+        "the dissipation coefficient must not be negative, which would amplify " *
+        "the shortest waves, got $dissipation"))
+    iszero(dissipation) || all(>=(2), fs.G) || throw(ArgumentError(
+        "the dissipation's fourth differences read two points past each owned " *
+        "one, so a nonzero dissipation needs G ≥ 2, got $(fs.G)"))
     backend = get_backend(fs.work)
     # The metric is never exchanged, so its parity is only what the
     # forest's reflecting faces require a set to say; `u`'s does.
@@ -175,21 +220,29 @@ function PatchWaveProblem(fs::FieldSet{T,D}, schedule, layout) where {T,D}
     spacings = to_backend(backend, block_spacings(fs.forest, T))
     G = fs.G
     return PatchWaveProblem{T,D,G,typeof(fs),typeof(schedule),typeof(metric),
-                            typeof(spacings),typeof(layout)}(
-        fs, schedule, metric, spacings, layout, Val(D), Val(G))
+                            typeof(spacings),typeof(layout),typeof(boundary)}(
+        fs, schedule, metric, spacings, layout, T(dissipation), boundary, Val(D),
+        Val(G))
 end
 
 # The right-hand side from ghosts already filled, which a test of the
-# operator sets itself.
+# operator sets itself. `appendix = true` is ignored on a set without
+# one, where `statearray` is the cores' array.
 function patch_rhs!(du, p::PatchWaveProblem)
-    map_blocks!(patch_wave_rhs_kernel!, p.fs, statearray(du, p.fs), p.fs.work,
-                p.metric.work, p.spacings, p.valD, p.valG)
+    map_blocks!(patch_wave_rhs_kernel!, p.fs, statearray(du, p.fs; appendix=true),
+                p.fs.work, p.metric.work, p.spacings, p.ε, p.valD, p.valG;
+                appendix=true)
     return nothing
 end
 
+# The ghosts of `p.fs`, with the boundary hook at time `t` if it has one.
+patch_fill!(p::PatchWaveProblem, t) =
+    p.boundary === nothing ? fill_ghosts!(p.fs, p.schedule) :
+    fill_ghosts!(p.fs, p.schedule; boundary=p.boundary(t))
+
 function wave_rhs!(du, u, p::PatchWaveProblem, t)
     scatter!(p.fs, u)
-    fill_ghosts!(p.fs, p.schedule)
+    patch_fill!(p, t)
     patch_rhs!(du, p)
     return nothing
 end

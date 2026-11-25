@@ -152,7 +152,7 @@ function annulus_errors(::Type{T}=Float64; N, roots=(2, 1), r0=1, r1=2, m::Integ
     layout = PolarAnnulus{T}(r0, r1, roots)
     forest = annulus_forest(T, layout; N=N)
     fs = FieldSet(forest, 2; G=G, centering=vertexcentered(2), parity=ANNULUS_PARITY)
-    problem = PatchWaveProblem(fs, GhostSchedule(fs, ops), layout)
+    problem = PatchWaveProblem(fs, GhostSchedule(fs, ops), layout; dissipation=0)
     k = annulus_wavenumber(m, n, r0, r1)
 
     fill_by_coordinates!(annulus_exact(layout, m, k, 0), fs)
