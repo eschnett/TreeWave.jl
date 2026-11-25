@@ -1,7 +1,8 @@
 # The wave equation on the seven-patch ball (TreeAMR's M20, step 5): the
 # ghosts across every glue interpolated, every glued face point evolved by
 # each patch holding it, and Kreiss–Oliger dissipation for the corners
-# where three patches meet. See "The seven-patch ball" in `CODE.md`.
+# where three patches meet; and on the ball reduced by a symmetry
+# (TreeAMR's M21, step 6). See "The seven-patch ball" in `CODE.md`.
 
 using TreeMultiPatch: SevenPatchBall, layout_forest
 using TreeAMR: chart_map
@@ -63,6 +64,34 @@ end
     @test r.difference < 1e-14 * r.scale
 end
 
+@testset "Data and its quarter-turned image evolve into each other's images" begin
+    # The quarter turn about z maps the ball onto itself too, but a point on
+    # |x| = |y| between two shells, where the shells' diagonal corner ghosts
+    # lie, is interpolated from the shell TreeMultiPatch's `ties` names, and
+    # the two shells' copies of their face differ by the scheme's error. So
+    # the run commutes with the turn to rounding under `ties = :turn`, and
+    # not under the default `:mirror` (measured 1e-15 and 3e-2, of 1.1),
+    # which is what made the quarter-turned ball drift from the full one.
+    r = ball_asymmetry(; N=8, symmetry=:turn, tend=2, ties=:turn)
+    @test r.difference < 1e-14 * r.scale
+    r = ball_asymmetry(; N=8, symmetry=:turn, tend=2, ties=:mirror)
+    @test r.difference > 1e-3 * r.scale
+end
+
+@testset "Each reduced ball's run is the full ball's, restricted: $sym" for
+        sym in (:bitant, :quadrant, :octant, :quarter, :half, :quarter_bitant, :half_bitant)
+    # TreeAMR's M21 on the wave equation: the plane wave summed over the
+    # symmetry's images, run on the reduced ball (mirror faces, turned
+    # seams, ghosts folded across both beside the kinked glues) and on its
+    # full ball, which takes the tie rule the symmetry keeps. A mirrored or
+    # turned copy with the wrong sign or axes, a fold to the wrong image, or
+    # a seam plane evolved with another stencil than the full ball's
+    # interior one, shows as the scheme's error and grows; measured 5e-15
+    # to 6e-15 of the scale over t = 2.
+    r = ball_symmetric_difference(; N=8, symmetry=sym, tend=2)
+    @test r.difference < 2e-14 * r.scale
+end
+
 @testset "The closed ball's energy stays bounded at the corners' dissipation" begin
     # Random data, `u = v = 0` beyond the outer sphere, many crossing
     # times. Where three patches meet the scheme has a spatial
@@ -70,6 +99,19 @@ end
     # prototype); an appendix plane evolved with the wrong stencil or a
     # dissipation of the wrong sign grows without bound.
     ts, Es = ball_energies(; N=8, tend=40, every=10)
+    @test all(<=(Es[1]), Es)
+    @test all(i -> Es[i + 1] <= Es[i], 2:length(Es) - 1)
+end
+
+@testset "A reduced ball's energy stays bounded too: $sym" for sym in (:octant, :quarter_bitant)
+    # As on the full ball, random data on the closed reduced ball, now with
+    # mirror faces and a turned seam beside the cube's corners (TreeAMR's
+    # M21). A seam plane evolved with the wrong stencil, or a mirrored or
+    # turned ghost of the wrong sign, feeds the corners' instability. The
+    # two smallest reductions, one with mirrors only and one with the
+    # turn; measured, every reduction's energy falls at every sample, to
+    # about 1e-4 of its start by t = 40.
+    ts, Es = ball_energies(; N=8, tend=40, every=10, roots=(2, 1), symmetry=sym)
     @test all(<=(Es[1]), Es)
     @test all(i -> Es[i + 1] <= Es[i], 2:length(Es) - 1)
 end

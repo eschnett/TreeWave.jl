@@ -679,7 +679,40 @@ image of the one with the other, each copy of a glued face point with
 the copy its image is. Under closed ownership each copy is evolved by
 its own patch's stencil, and both symmetries hold to rounding — the
 mirror too, though it turns the shells' quarter turns the other way, as
-TreeAMR's prototype found for closed ownership.
+TreeAMR's prototype found for closed ownership. The quarter turn about
+`z` (`:turn`) holds only with TreeMultiPatch's `ties = :turn`: a point on
+`|x| = |y|` between two shells, where their diagonal corner ghosts lie, is
+interpolated from the shell the rule names, and the two shells' copies of
+their face differ by the scheme's error. The default rule, `:mirror`,
+keeps the mirrors and the inversion; no rule keeps the mirrors and the
+turn, which the mirror `x ↔ y` forbids.
+
+**Reduced balls** (TreeAMR's M21). `ball_problem(…; symmetry)` runs the
+ball reduced by a symmetry, TreeMultiPatch's `SymmetricBall`: a half, a
+quarter or an eighth, cut by mirror planes and turned seams, its sets'
+`u` and `v` declared scalars (even under every mirror, carried onto
+themselves by a turn), the metric set given the identity turn map. A
+reduced ball's run is its full ball's, restricted: `SymmetricWave` sums a
+plane wave over the symmetry's images, an exact solution with the
+symmetry and its own Dirichlet data, and `ball_symmetric_difference`
+runs it on the reduced ball and on the reduced ball's `full`, with the
+full ball's step count, and compares every point the reduced ball holds.
+The oracle is `full`, not `SevenPatchBall(…)`, because it carries the tie
+rule the symmetry keeps; with the default rule the quarter turn's runs
+part by the scheme's error from the full ball's shell edges, which looked
+like an instability growing from rounding (`HISTORY.md`). Its eigenvalues
+say otherwise: the quarter-turned ball at `N = 6`, ε = 1/2, has none
+with a positive real part (largest −0.003), and without dissipation
++0.56, M20's corner instability.
+
+**(open)** On a mesh refined about the origin (`refine`) the agreement is
+the scheme's error, not rounding: a coarse–fine face is the fine block's
+owned plane when it is that block's low face and the coarse block's, its
+fine points prolonged, when it is its high face, so the full ball's run
+has no mirror or turn symmetry there, and the reduced ball keeps only the
+high faces. This is TreeAMR's open asymmetry of vertex-like sets at
+coarse–fine faces (its `CODE.md`, "Centerings"), which M21's step 6, as
+written, is the first to ask about.
 
 ## Precision
 
@@ -1633,7 +1666,7 @@ an intermediate solution.
 | `src/benchmark.jl` | per-phase and end-to-end timings, for the thread-scaling measurement |
 | `src/patches.jl` | the wave equation on patches: the metric set, `fill_stored!`, the patch RHS kernel with its appendix and dissipation, `PatchWaveProblem`, `patch_timestep` — see Patches |
 | `src/annulus.jl` | the rotating Bessel mode on the four-patch annulus, its wavenumber, forest and convergence driver |
-| `src/ball.jl` | the plane wave on the seven-patch ball, its convergence driver, the patches' quadrature, energy and volume, and the symmetry measurement |
+| `src/ball.jl` | the plane wave on the seven-patch ball, its convergence driver, the patches' quadrature, energy and volume, the symmetry measurement, and the reduced balls against the full one |
 | `test/sinewave_tests.jl` | convergence order, the interface-order rule, the stagger's two consequences, 3D smoke test, energy drift |
 | `test/refinement_tests.jl` | claims about the indicator itself |
 | `test/supergaussian_tests.jl` | a moving refined region tracks the pulse |
@@ -1642,7 +1675,7 @@ an intermediate solution.
 | `test/supergaussian_cell_tests.jl` | " |
 | `test/blast_cell_tests.jl` | " |
 | `test/patch_tests.jl` | the metric at every stored point, second-order convergence of the patch Laplacian on the annulus and the seven-patch ball, the Bessel mode's convergence, the refusal of a cell-centred set |
-| `test/ball_tests.jl` | the ball's volume by the quadrature, the plane wave's convergence with and without dissipation, inversion and mirror symmetry to rounding, the closed ball's energy, the refusal of dissipation at `G = 1` |
+| `test/ball_tests.jl` | the ball's volume by the quadrature, the plane wave's convergence with and without dissipation, inversion, mirror and quarter-turn symmetry to rounding, each reduced ball's run against its full ball's, the closed ball's energy, full and reduced, the refusal of dissipation at `G = 1` |
 | `test/type_tests.jl` | the drivers at `Float32` and at MultiFloats' `Float32x2` — see Precision |
 | `test/threading_tests.jl` | the answer does not move with the thread count |
 | `test/device_tests.jl` | the two forms of the criterion agree, the geometry follows the storage, and — with a device — a whole run reproduces the host run |
@@ -1833,7 +1866,23 @@ than as a test that merely still passes.
   without dissipation it grows by 1.3e27 by `t = 50`. Inversion and the
   mirror `x₁ → −x₁`: the largest difference between a run and its image
   7.8e−16 at `N = 8`, `t = 2`, and 6.0e−16 and 7.4e−16 at `N = 16`,
-  `t = 10`, against values up to 0.41: rounding.
+  `t = 10`, against values up to 0.41: rounding. The quarter turn: 1.1e−15
+  with `ties = :turn`, 3.4e−2 with `:mirror`, of 1.1, at `N = 8`, `t = 2`.
+- The reduced seven-patch balls, `roots = (2, 1)`, `N = 8`, `ε = 1/2`, the
+  plane wave `k = (1.1, −0.7, 0.5)`, `φ = 0.3` summed over the symmetry's
+  images, to `t = 2`: the largest difference from the full ball's run over
+  every point the reduced ball holds 1.2e−14 (bitant), 2.1e−14
+  (quadrant), 3.9e−14 (octant), 2.4e−14 (quarter), 1.2e−14 (half),
+  5.2e−14 (quarter and bitant), 2.8e−14 (half and bitant), of scales 2.8,
+  5.6, 8.8, 5.6, 2.8, 8.8, 4.4. Refined once about the origin, `roots =
+  (4, 2)`, `refine = 1/2`: 2.5e−5, 5.0e−5, 8.4e−5 for the bitant, quadrant
+  and octant (the **(open)** coarse–fine asymmetry). The closed reduced
+  ball's energy, random data, to `t = 40` every 10: falls at every sample,
+  to 9.9e−5 (octant), 8.0e−5 (quarter), 7.9e−5 (half), 7.9e−5 (bitant),
+  1.1e−4 (quadrant), 5.7e−5 (quarter and bitant), 8.2e−5 (half and
+  bitant) of its start. The quarter-turned ball's semi-discrete operator
+  at `N = 6`: largest real part of an eigenvalue −0.0029 at `ε = 1/2`,
+  +0.56 without dissipation.
 - Sine mode, two-level mesh, order-4 operators: L2 and L∞ rates both 2.0
   (D = 1, 2), at `G = 1` vertex-centred and `G = 2` cell-centred.
   Vertex-centred L2 rates 1.99 (D = 1) and 1.99 (D = 2); cell-centred the

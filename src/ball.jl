@@ -111,7 +111,8 @@ zero_hook(t) = CellBoundary(AllVariables((x, δ) -> (zero(x[1]), zero(x[1]))))
 
 """
     ball_problem([T]; N, roots=(1, 1), Lc=1, R1=3, G=2, glue=4,
-                 dissipation=1/2, boundary)
+                 dissipation=1/2, boundary, symmetry=nothing, refine=nothing,
+                 ties=nothing)
 
 The wave equation on the seven-patch ball `SevenPatchBall(Lc, R1, roots)`,
 `N` cells per block, interpolated across every glue at order `glue`, with
@@ -123,11 +124,22 @@ Dirichlet data, `_ -> zero_hook` for the closed ball.
 The interpolation order is the scheme's to say: a second derivative of
 order 2 needs ghosts exact to degree 3, `glue = 4`, and a 4-point stencil
 needs `G ≥ 2` (TreeAMR's `k ≤ 2(G + 1)`), as the dissipation does.
+
+`symmetry` reduces the ball (TreeMultiPatch's `SymmetricBall`, TreeAMR's
+M21), `u` and `v` declared scalars under its mirrors and turns. `refine`
+refines the cube's leaves within `|x|∞ ≤ refine` once about the origin;
+a shell's ghosts reach into the cube, and M20 refuses a refined leaf
+within their reach, so the roots must keep the refined blocks clear of
+them (`(4, 2)` at `refine = 1/2`, not `(4, 1)`). `ties` is TreeMultiPatch's
+rule for a point between two shells, its default if `nothing`: the full
+ball compared with a reduced one takes the reduced ball's (`:turn` under a
+quarter turn), or its run lacks the symmetry.
 """
 function ball_problem(::Type{T}=Float64; N, roots=(1, 1), Lc=1, R1=3, G=2, glue=4,
                       dissipation=T(1//2), boundary, symmetry=nothing,
-                      refine=nothing) where {T}
-    layout = SevenPatchBall(T(Lc), T(R1), roots; symmetry=symmetry)
+                      refine=nothing, ties=nothing) where {T}
+    layout = SevenPatchBall(T(Lc), T(R1), roots; symmetry=symmetry,
+                            (ties === nothing ? (;) : (; ties=ties))...)
     forest = layout_forest(T, layout; N=N)
     refine === nothing || refine_about_origin!(forest, layout, T(refine))
     # On a reduced ball (M21) `u` and `v` are scalars: even under every
@@ -329,12 +341,13 @@ patch_volume(p::PatchWaveProblem) =
 
 """
     ball_energies([T]; N, tend, every=1, roots=(1, 1), dissipation=1/2,
-                  cfl=1/4, seed=1)
+                  cfl=1/4, seed=1, symmetry=nothing, refine=nothing)
 
 The energy of random data (uniform in `[-1, 1]` at every point the state
 holds, from a seeded `Xoshiro`) on the closed seven-patch ball of
 [`ball_problem`](@ref), `u = v = 0` beyond the outer sphere, every
-`every` time units to `tend`: the times and the energies.
+`every` time units to `tend`: the times and the energies. `symmetry` and
+`refine` are [`ball_problem`](@ref)'s.
 """
 function ball_energies(::Type{T}=Float64; N, tend, every=1, roots=(1, 1),
                        dissipation=T(1//2), cfl=T(1//4), seed=1, symmetry=nothing,
@@ -355,13 +368,18 @@ function ball_energies(::Type{T}=Float64; N, tend, every=1, roots=(1, 1),
 end
 
 # The image of point `I` of patch `q` of the seven-patch ball under the
-# point inversion `x → -x` (`:inversion`) or the mirror `x₁ → -x₁`
-# (`:mirror`), at `M` cells per patch along each dimension. The cube's
+# point inversion `x → -x` (`:inversion`), the mirror `x₁ → -x₁`
+# (`:mirror`) or the quarter turn `(x₁, x₂) → (-x₂, x₁)` about `z`
+# (`:turn`), at `M` cells per patch along each dimension. The cube's
 # indices along a reversed axis turn round; a shell over the cube's face
 # `(k, s)` goes to the shell over `(k, -s)` when the symmetry reverses
 # `x_k`, with its radius kept, and its tangential axes, each along an
-# `x_j`, turn round where `x_j` is reversed.
+# `x_j`, turn round where `x_j` is reversed. The turn takes the image's
+# `x₁` from `-x₂` and its `x₂` from `x₁`, so the shell over `(1, s)` to
+# the one over `(2, s)` and that over `(2, s)` to `(1, -s)`; a radial
+# index is kept, a tangential one turns round where the sign is reversed.
 function ball_image(layout, symmetry, q, I, N)
+    symmetry === :turn && return ball_turn_image(layout, q, I, N)
     flips = symmetry === :inversion ? (true, true, true) : (true, false, false)
     M = patch_points(layout, q, N)
     if q == 1
@@ -372,24 +390,37 @@ function ball_image(layout, symmetry, q, I, N)
     return q′, ntuple(d -> d != k && flips[d] ? M[d] - I[d] : I[d], 3)
 end
 
+function ball_turn_image(layout, q, I, N)
+    M = patch_points(layout, q, N)
+    k = q == 1 ? 0 : radial_dimension(layout, q)
+    s = q == 1 ? 1 : (isodd(q) ? 1 : -1)
+    k′, s′ = k == 1 ? (2, s) : k == 2 ? (1, -s) : (k, s)
+    q′ = k′ == 0 ? 1 : 1 + 2(k′ - 1) + (s′ == 1 ? 2 : 1)
+    return q′, (k′ == 1 ? I[2] : M[2] - I[2], I[1], I[3])
+end
+
 """
     ball_asymmetry([T]; N, symmetry, tend, roots=(1, 1), dissipation=1/2,
-                   cfl=1/4, seed=1)
+                   cfl=1/4, seed=1, ties=:mirror)
 
 Evolve random data `A` and its image `B` under `symmetry`, `:inversion`
-(`x → -x`) or `:mirror` (`x₁ → -x₁`), on the closed seven-patch ball to
-`tend`, and return the largest difference between `B` and the image of
-`A` at the end, over every point the state holds, and the largest value
-of `A` there for scale. Each copy of a glued face point is compared with
-the copy its image is, on the image's patch.
+(`x → -x`), `:mirror` (`x₁ → -x₁`) or `:turn` (`(x₁, x₂) → (-x₂, x₁)`),
+on the closed seven-patch ball to `tend`, and return the largest
+difference between `B` and the image of `A` at the end, over every point
+the state holds, and the largest value of `A` there for scale. Each copy
+of a glued face point is compared with the copy its image is, on the
+image's patch. `ties` is the ball's rule for a point between two shells
+(TreeMultiPatch's `SevenPatchBall`): `:mirror` keeps the mirrors and the
+inversion, `:turn` the turn and the inversion.
 """
 function ball_asymmetry(::Type{T}=Float64; N, symmetry, tend, roots=(1, 1),
-                        dissipation=T(1//2), cfl=T(1//4), seed=1) where {T}
-    symmetry in (:inversion, :mirror) || throw(ArgumentError(
-        "the seven-patch ball's symmetries measured here are :inversion and " *
-        ":mirror, got $(repr(symmetry))"))
+                        dissipation=T(1//2), cfl=T(1//4), seed=1,
+                        ties=:mirror) where {T}
+    symmetry in (:inversion, :mirror, :turn) || throw(ArgumentError(
+        "the seven-patch ball's symmetries measured here are :inversion, :mirror " *
+        "and :turn, got $(repr(symmetry))"))
     p, layout = ball_problem(T; N=N, roots=roots, dissipation=dissipation,
-                             boundary=_ -> zero_hook)
+                             boundary=_ -> zero_hook, ties=ties)
     fs = p.fs
     uA = statevector(fs)
     uA .= 2 .* rand(Xoshiro(seed), T, length(uA)) .- 1
@@ -430,9 +461,13 @@ The run of the seven-patch ball reduced by `symmetry` (TreeMultiPatch's
 the plane wave's images under the symmetry's group ([`SymmetricWave`](@ref)),
 an exact solution with that symmetry, with its own Dirichlet data, to
 `tend`: the largest difference over every point the reduced ball holds
-and the full one's at the same position, and the largest value. Both
-balls refined `refine` about the origin when given. The step count of
-both is the same, the time step being the cube's.
+and the full one's at the same position, and the largest value. The
+full ball is the reduced one's `full`, whose rule for a point between two
+shells is one the symmetry keeps. Both balls refined `refine` about the
+origin when given, where the two agree only to the scheme's error, since
+a refined full ball's coarse–fine faces are not symmetric (**(open)**,
+"The seven-patch ball" in `CODE.md`). The step count of both is the same,
+the time step being the cube's.
 """
 function ball_symmetric_difference(::Type{T}=Float64; N, symmetry, tend, roots=(2, 1),
                                    refine=nothing, k=(1.1, -0.7, 0.5), φ=0.3,
@@ -441,10 +476,14 @@ function ball_symmetric_difference(::Type{T}=Float64; N, symmetry, tend, roots=(
     wave = SymmetricWave(PlaneWave(T.(k), T(φ)), reduced.mirrors, reduced.turn)
     # Both take the full ball's steps: the reduced ball's own step could
     # differ, its fastest point being elsewhere, and then so would the runs.
+    # The full ball is the reduced one's `full`, whose rule for a point
+    # between two shells is one the symmetry keeps (TreeMultiPatch's
+    # `ties`): with the other, a run of it does not have the symmetry.
+    ties = reduced.full.turnties ? :turn : :mirror
     run(sym, steps) = begin
         p, layout = ball_problem(T; N=N, roots=roots, dissipation=dissipation,
                                  boundary=l -> PlaneWaveHook(l, wave), symmetry=sym,
-                                 refine=refine)
+                                 refine=refine, ties=ties)
         u0 = filled_state(ball_exact(layout, wave, zero(T)), p.fs)
         steps = something(steps, max(1, ceilint(T(tend) / patch_timestep(p; cfl=cfl))))
         u, _ = patch_evolve(p, u0, zero(T), T(tend); cfl=cfl, nsteps=steps)

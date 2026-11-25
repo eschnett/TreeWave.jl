@@ -26,6 +26,7 @@ layouts — and, as its other half, conservation at coarse-fine faces
 - [Patches](#patches)
   - [M20 step 3: the annulus](#m20-step-3-the-annulus)
   - [M20 step 5: the seven-patch ball](#m20-step-5-the-seven-patch-ball)
+  - [M21 step 6: the symmetric balls](#m21-step-6-the-symmetric-balls)
 - [The refinement criterion](#the-refinement-criterion)
   - [The blast wave's calibration recipe](#the-blast-waves-calibration-recipe)
 - [Multi-threading](#multi-threading)
@@ -164,6 +165,41 @@ difference from the mirror image, measured, is rounding as well, at
 7.4e−16, as TreeAMR's prototype found for closed ownership. Unlike the
 prototype's fourth-order scheme, this one was stable at `ε = 0.1`; at
 `ε = 0` it was not.
+
+### M21 step 6: the symmetric balls
+
+2026-11-25, against TreeAMR's and TreeMultiPatch's M21 checkouts through
+`[sources]`. `ball_problem` took `symmetry` and `refine`, `SymmetricWave`
+and `ball_symmetric_difference` the comparison of a reduced ball's run
+with the full ball's. The octant and the half turn agreed to rounding at
+once; the quarter turn did not, from 3e-15 at `t = 0.05` to 2e-8 at `t =
+0.5`, about `e^{25t}`, largest where the `+z` shell's seam meets its
+kinked glue to the `+y` shell beside the cube. The right-hand side at
+`t = 0` agreed with the full ball's to 1e-15 of its scale even for a
+plane wave of `|k| ≈ 75`, at grid scale, so the reduced operator was
+right; what was not symmetric was the full ball. Its run of the turned
+wave sum lost the quarter-turn symmetry by 6e-4 by `t = 0.25`, first at
+the `+z` shell's edges where three shells meet: TreeMultiPatch's atlas
+broke a tie `|x| = |y|` toward the `x` shell, the shells' diagonal corner
+ghosts lie on such ties, and the two shells' copies of their face differ
+by the scheme's error. The rule commutes with the mirrors and not with
+the turn, and the apparent growth was that asymmetry crossing to the
+seam. Erik suggested, while this was being found, a 2D model and the
+eigenvalues of the operator; the eigenvalues, at `N = 6`, confirmed that
+the reduced ball has no growing mode at `ε = 1/2`. TreeMultiPatch's balls took `ties`, `:mirror` the old rule and
+`:turn` one that commutes with the turn, a reduced ball's `full` the one
+its symmetry keeps, and this comparison runs against `full`. All seven
+reductions then agreed to rounding over `t = 2`, and each reduced ball's
+energy fell at every sample to `t = 40`.
+
+Refined about the origin they did not, and cannot as TreeAMR stands: a
+vertex-like set's coarse–fine face belongs to the fine block on its low
+side and to the coarse block on its high side, so the refined full ball
+is not symmetric (TreeAMR's own **(open)** item under "Centerings").
+Measured at `roots = (4, 2)`, `refine = 1/2`, `t = 2`: 2.5e-5, 5.0e-5 and
+8.4e-5 of scales 2.8, 5.6 and 8.9 for the bitant, the quadrant and the
+octant. `roots = (4, 1)`, which the step's plan had in mind, is refused:
+a shell's ghosts reach `x = 1/2` into the cube, the refined blocks' face.
 
 ## The refinement criterion
 
