@@ -67,7 +67,7 @@ export blast_initial, blast_reference, blast_radial_table, blast_exact,
 # The wave equation on a forest of patches, and the annulus
 export PatchWaveProblem, patch_timestep, fill_stored!
 export annulus_wavenumber, annulus_exact, annulus_forest, annulus_errors
-export PlaneWave, PlaneWaveHook, ball_exact, ball_problem, ball_errors, ball_energies,
+export PlaneWave, PlaneWaveHook, SymmetricWave, ball_symmetric_difference, ball_exact, ball_problem, ball_errors, ball_energies,
        ball_asymmetry, patch_energy, patch_volume, patch_quadrature, owned_points
 
 # Refinement criterion
