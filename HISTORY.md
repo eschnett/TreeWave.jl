@@ -136,16 +136,19 @@ the cell-centred derivatives the flat box keeps as a comparison are not
 carried over to patches.
 
 TreeMultiPatch is not registered yet, so `Project.toml` and
-`test/Project.toml` reach it through a `[sources]` path, relative to this
-branch's worktree. Registering it is M20's step 6, after which the path
-gives way to a `[compat]` bound like TreeAMR's.
+`test/Project.toml` reached it through a `[sources]` path, relative to
+this branch's worktree; on 2026-11-25, once it had a repository, the
+path became its GitHub `main`, which CI can reach. Registering it is
+M20's step 6, after which the entry gives way to a `[compat]` bound like
+TreeAMR's.
 
 ### M20 step 5: the seven-patch ball
 
 Step 5, 2026-11-24, ahead of step 2 as step 3 was: a plane wave on the
 seven-patch ball, interpolated across every glue with closed ownership
-and the appendix, TreeAMR's M20 step 4, which is not released yet, so
-`[sources]` names TreeAMR's M20 checkout on this branch. The right-hand
+and the appendix, TreeAMR's M20 step 4, which was not released yet, so
+`[sources]` named TreeAMR's M20 checkout on this branch until 0.2.12
+([The TreeAMR bound](#the-treeamr-bound)). The right-hand
 side gained the appendix, Kreiss–Oliger dissipation of the scheme's
 order plus one, and a boundary hook that follows the time; the ball
 gained the energy and volume by each patch's trapezoidal rule and the
@@ -361,7 +364,11 @@ for the tests) were left where they were, since nothing newer from them
 is used; the same update resolved SciMLBase 3.58.0,
 OrdinaryDiffEqLowOrderRK 2.2.6, SpecialFunctions 2.9.1 and TreeAMR
 0.2.6. KernelAbstractions stayed at 0.9.45: 0.10 was out, but every
-TreeAMR release so far admits only `0.9.42-0.9` and `1`.
+TreeAMR release so far admits only `0.9.42-0.9` and `1`. It was
+`"0.2.6"` until 2026-11-25, when TreeAMR 0.2.12 was registered with
+the ghosts interpolated across a glue that the seven-patch ball (TreeAMR's
+M20 step 5) needs; the `[sources]` path to TreeAMR's M20 checkout, which
+the ball had used until then, went with it.
 
 ### From two branch pins to one bound
 

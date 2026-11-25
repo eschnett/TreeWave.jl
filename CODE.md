@@ -1755,11 +1755,11 @@ Julia 1.13 is the floor, and the only version CI tests. Who raised it to
 1.13, when and why, and what it was before, is in
 [HISTORY.md](HISTORY.md#the-julia-floor).
 
-TreeAMR is an ordinary `[compat]` bound, `TreeAMR = "0.2.6"` — the rest
-of the `0.2` series from 0.2.6 on, not a pin to one release; 0.2.6 is the
-release that added the folds over points the diagnostics use (see [What
-an application has to do that the mesh does
-not](#what-an-application-has-to-do-that-the-mesh-does-not)). A resolve
+TreeAMR is an ordinary `[compat]` bound, `TreeAMR = "0.2.12"` — the rest
+of the `0.2` series from 0.2.12 on, not a pin to one release; 0.2.12 is
+the release that interpolates ghosts across a glue, which the
+seven-patch ball needs ([The seven-patch
+ball](#the-seven-patch-ball-srcballjl)). A resolve
 takes the newest registered `0.2.x`, and the bound is raised only when
 this package comes to need something a newer one added, or when TreeAMR
 breaks its API in a new minor series. Its earlier values are in

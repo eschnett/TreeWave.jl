@@ -276,13 +276,12 @@ Match TreeAMR's style, since the two are read together:
   script too: nothing in the suite or CI compares them ("Driving a run
   from a script").
 - `bin/output/` is gitignored; the viewer writes PNGs there.
-- **TreeMultiPatch is not registered yet, and the ball needs an
-  unreleased TreeAMR**: on this branch `Project.toml` and
-  `test/Project.toml` reach both through `[sources]` paths relative to
-  the worktree, TreeAMR's to its M20 checkout. TreeAMR's M20 step 6
-  releases TreeAMR and registers TreeMultiPatch, after which both paths
-  give way to `[compat]` bounds and the rule above, TreeAMR from the
-  registry, holds again.
+- **TreeMultiPatch is not registered yet**: `Project.toml` and
+  `test/Project.toml` take it from its GitHub `main` through `[sources]`,
+  and `bin/` inherits that through its path to the package. Registering
+  it is TreeAMR's M20 step 6, after which the entries give way to the
+  `[compat]` bound; a release of TreeWave waits for that, since General
+  refuses a package whose dependency it does not have.
 - `main` is committed and published: `origin` is
   `git@github.com:eschnett/TreeWave.jl.git`, and `main` tracks it. Work on a
   branch; do not push, open a pull request, or merge to `main` without being
