@@ -42,7 +42,10 @@ using KernelAbstractions: @kernel, @index, @Const, Backend, CPU, get_backend,
                           allocate, supports_float64, synchronize
 using OrdinaryDiffEqLowOrderRK: RK4
 using SciMLBase: ODEProblem, solve
-using SpecialFunctions: besselj0
+using SpecialFunctions: besselj0, besselj, bessely
+using TreeAMR: chart_map
+using TreeMultiPatch: PolarAnnulus, layout_forest, patch_frame, logical_speed,
+                      volume_element
 
 # Devices
 export hostcopy
@@ -59,6 +62,10 @@ export supergaussian, dsupergaussian, pulse_exact, track_pulse, uniform_pulse
 # Initial condition: radial blast wave
 export blast_initial, blast_reference, blast_radial_table, blast_exact,
        blast_coverage, track_blast, uniform_blast
+
+# The wave equation on a forest of patches, and the annulus
+export PatchWaveProblem, patch_timestep, fill_stored!
+export annulus_wavenumber, annulus_exact, annulus_forest, annulus_errors
 
 # Refinement criterion
 export lohner, field_scales, cell_indicator, refine_mark, refine_flags,
@@ -79,5 +86,7 @@ include("sinewave.jl")
 include("supergaussian.jl")
 include("blast.jl")
 include("benchmark.jl")
+include("patches.jl")
+include("annulus.jl")
 
 end

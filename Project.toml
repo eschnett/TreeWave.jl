@@ -9,6 +9,10 @@ OrdinaryDiffEqLowOrderRK = "1344f307-1e59-4825-a18e-ace9aa3fa4c6"
 SciMLBase = "0bca4576-84f4-4d90-8ffe-ffa030f20462"
 SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
 TreeAMR = "91bc416d-811c-44c1-9bc4-b9c8bbdbbd08"
+TreeMultiPatch = "7cd1219e-1b18-4d4d-a931-ceef91256e6d"
+
+[sources]
+TreeMultiPatch = {path = "../../../../TreeMultiPatch"}
 
 [compat]
 KernelAbstractions = "0.9.42"
@@ -16,4 +20,5 @@ OrdinaryDiffEqLowOrderRK = "2.2.5"
 SciMLBase = "3.50.1"
 SpecialFunctions = "2"
 TreeAMR = "0.2.6"
+TreeMultiPatch = "0.1"
 julia = "1.13"

@@ -26,6 +26,9 @@ milestones M5–M8, named below by number, were.
   - [Radial blast wave](#radial-blast-wave-srcblastjl)
 - [Centerings](#centerings)
 - [Operator order: the constraint inherited from TreeAMR](#operator-order-the-constraint-inherited-from-treeamr)
+- [Patches](#patches)
+  - [The Laplacian through the metric](#the-laplacian-through-the-metric)
+  - [The rotating Bessel mode on the annulus](#the-rotating-bessel-mode-on-the-annulus-srcannulusjl)
 - [Precision](#precision)
   - [The rule](#the-rule)
   - [Base does not come along](#base-does-not-come-along)
@@ -508,6 +511,100 @@ only, which is what its testset has always asserted, and the two
 off-diagonal rows there are asserted as "below 1.5" rather than as a
 number because what matters is that raising one order alone does not
 reach 2. The vertex rows come in pairs because they are the same run.
+
+## Patches
+
+TreeAMR's forests of patches (its M17) are logical: every root is the
+unit cube of its patch, the glue says which face meets which, and nothing
+in the mesh knows that the patches are curved. The maps from the
+patches' logical coordinates `ξ` to physical space, with their volume
+element `√g` and area vectors `S[a] = √g ∇ξ^a`, are
+[TreeMultiPatch](https://github.com/eschnett/TreeMultiPatch.jl)'s, which
+holds the four-patch annulus and the seven- and thirteen-patch balls for
+every application on a patch system. The wave equation on patches is
+this package's part of TreeAMR's M20: the scheme of the flat box, its
+Laplacian written in logical coordinates through the metric.
+
+**Vertex-centred only.** The flat box keeps the cell-centred layout
+beside the vertex-centred one as a comparison ([Centerings](#centerings));
+patches do not. A glued face is a vertex plane, which TreeAMR's glue and
+TreeMultiPatch's alignment of the maps are written for, and the metric
+here is placed at vertices. `PatchWaveProblem` refuses any other set.
+Erik's decision, so that the patch systems do not double the studies.
+
+**Step 3: the annulus, copied ghosts.** The annulus's glues are
+identities and its maps join smoothly, `θ` linear through every glue, so
+a ghost copied across a glue sits where the target patch's own map, extended
+past its box, puts it: the copy *is* the interpolation, and TreeAMR's
+copied ghosts are enough. The balls are not like that, and need the
+interpolated ghosts of TreeAMR's M20 (`glue = :interpolate`) and the
+appendix of points their closed ownership adds; that is the next step,
+not this one.
+
+### The Laplacian through the metric
+
+[`src/patches.jl`](src/patches.jl) writes the Laplacian in conservative
+form,
+
+    ∇²u = (1/√g) ∂_a (A^{ab} ∂_b u),     A^{ab} = S[a] ⋅ S[b] / √g = √g g^{ab},
+
+second order, in logical coordinates with the block's logical spacing
+`h`. The diagonal terms are the flat box's three-point stencil with
+`A^{aa}` averaged to the half points; the cross terms, `a ≠ b`, are
+centered differences of centered differences, and read the edge ghosts
+`c ± e_a ± e_b`, which TreeAMR fills for a vertex-centred set. On the
+annulus the coordinates are orthogonal and the cross terms vanish; on a
+ball's shells they do not. The kernel is `wave_rhs_kernel!` with the
+metric's coefficients, and `wave_rhs!` takes a `PatchWaveProblem` as it
+takes a `WaveProblem`.
+
+**The metric is a field set, filled everywhere.** `√g`, the `D(D+1)/2`
+coefficients `A^{ab}` and the largest logical speed of light
+(TreeMultiPatch's `logical_speed`) sit in a field set of their own on the
+state's layout, filled once, when the problem is built. TreeAMR's
+`fill_by_coordinates!` fills the owned points only, since the ghosts are
+the exchange's; but the stencil reads the coefficients at the ghosts too,
+and a coefficient is known wherever the map is, which TreeMultiPatch
+defines past each box. So `fill_stored!` fills every stored point of
+every block from a callback `f(ξ, p) -> vals` of the logical position and
+the patch, ghosts and shared plane included, and the metric is never
+exchanged. Below the annulus's inner wall that is the map continued,
+`r = r0 - r′h`, which stays positive while `r0 > r′/N`.
+
+**The time step** is `patch_timestep`: `cfl` times the logical spacing
+over the largest logical speed of light, `√λ_max(g^{ab})`, block by
+block, through `mesh_mapreduce` with the spacing as the weight. On the
+annulus the speed is largest at the inner wall, `1/(r0 θ′)`.
+
+**Walls.** The annulus's walls are TreeAMR's reflecting faces, with `u`
+and `v` even. A vertex-centred reflecting face mirrors the ghosts about
+the wall plane, `u(r0 - h) = u(r0 + h)`, which with the metric continued
+below the wall is the ghost-point Neumann condition, second order. The
+low wall `r0` is owned and evolved; the high wall `r1` is TreeAMR's
+derived wall point, of the prolongation order, `4` here, and is not
+evolved (TreeAMR's `CODE.md`, "Centerings").
+
+### The rotating Bessel mode on the annulus ([`src/annulus.jl`](src/annulus.jl))
+
+On `r0 ≤ r ≤ r1` with Neumann walls,
+
+    u = R(kr) cos(mθ - kt),   R(z) = J_m(z) Y_m′(kr0) - Y_m(z) J_m′(kr0),
+
+with `k` a root of `J_m′(kr0) Y_m′(kr1) - J_m′(kr1) Y_m′(kr0)`
+(`annulus_wavenumber`), so that `R′` vanishes on both walls, and `R` scaled
+to `R(kr0) = 1`. The pattern turns at the angular speed `k/m`, so it
+carries flux through every glued face; a quarter turn, `(π/2)m/k`, which
+`annulus_errors` runs by default, moves every point of it across one. The
+mode is TreeWaveOLDG's, with its physical point taken from the layout's
+map rather than from the patch number, and it evaluates the Bessel
+functions in `Float64`, on the CPU.
+
+`annulus_errors` returns the `√g`-weighted L2 error of `u` and `v` and the
+L∞ error, against the radial spacing in physical units. The `√g`
+weighting goes through the norm TreeAMR has: the square root of `√g` at
+each owned point as a state vector `w`, and `‖w e‖/‖w‖`, the mean of `√g
+e²` over the mean of `√g`. Its numbers are under
+[Measured results](#measured-results).
 
 ## Precision
 
@@ -1459,6 +1556,8 @@ an intermediate solution.
 | `src/supergaussian.jl` | the travelling pulse, its AMR driver, and the uniform reference |
 | `src/blast.jl` | the radial blast wave, its Hankel-quadrature exact solution, its AMR driver, and the uniform reference |
 | `src/benchmark.jl` | per-phase and end-to-end timings, for the thread-scaling measurement |
+| `src/patches.jl` | the wave equation on patches: the metric set, `fill_stored!`, the patch RHS kernel, `PatchWaveProblem`, `patch_timestep` — see Patches |
+| `src/annulus.jl` | the rotating Bessel mode on the four-patch annulus, its wavenumber, forest and convergence driver |
 | `test/sinewave_tests.jl` | convergence order, the interface-order rule, the stagger's two consequences, 3D smoke test, energy drift |
 | `test/refinement_tests.jl` | claims about the indicator itself |
 | `test/supergaussian_tests.jl` | a moving refined region tracks the pulse |
@@ -1466,6 +1565,7 @@ an intermediate solution.
 | `test/sinewave_cell_tests.jl` | the three above, cell-centred: the identical assertions with `centering = cellcentered(D)` said out loud, so the numbers measured before vertex became the default stay under test — see Centerings |
 | `test/supergaussian_cell_tests.jl` | " |
 | `test/blast_cell_tests.jl` | " |
+| `test/patch_tests.jl` | the metric at every stored point, second-order convergence of the patch Laplacian on the annulus and the seven-patch ball, the Bessel mode's convergence, the refusal of a cell-centred set |
 | `test/type_tests.jl` | the drivers at `Float32` and at MultiFloats' `Float32x2` — see Precision |
 | `test/threading_tests.jl` | the answer does not move with the thread count |
 | `test/device_tests.jl` | the two forms of the criterion agree, the geometry follows the storage, and — with a device — a whole run reproduces the host run |
@@ -1627,6 +1727,17 @@ Recorded so that a regression is visible as a change in a number rather
 than as a test that merely still passes.
 
 - Sine mode, uniform mesh, order-2 operators: L2 rate 2.0 (D = 1, 2).
+- Patches. The Laplacian of `sin(k ⋅ x)`, filled at every stored point, at
+  `N = 4, 8, 16`: L∞ rates 1.98 and 2.00 on the annulus `0.5 ≤ r ≤ 2`,
+  1.82 and 1.83 on the seven-patch ball (`Lc = 0.4`, `R1 = 1`, one root a
+  patch), 1.98 from `N = 16` to 32; without the cross terms the ball's
+  error stays at 10. The rotating Bessel mode on the annulus, a quarter
+  turn at `cfl = 1/4`, `N = 8, 16, 32`: `m = 1, n = 1` on `1 ≤ r ≤ 2`
+  with `(2, 1)` roots a patch, L2 0.0050, 0.0012, 0.00030 (rate 2.04),
+  L∞ rate 1.99; `m = 3, n = 2` on `0.5 ≤ r ≤ 2` with `(3, 2)` roots, L2
+  rate 1.95, L∞ 1.94. Over 300 time units at `N = 16`, about 130 times
+  the quarter turn, the L2 error grows to 0.13, linearly, as the phase
+  error does.
 - Sine mode, two-level mesh, order-4 operators: L2 and L∞ rates both 2.0
   (D = 1, 2), at `G = 1` vertex-centred and `G = 2` cell-centred.
   Vertex-centred L2 rates 1.99 (D = 1) and 1.99 (D = 2); cell-centred the

@@ -23,6 +23,8 @@ layouts — and, as its other half, conservation at coarse-fine faces
   - [The pulse's sign bug](#the-pulses-sign-bug)
 - [Centerings](#centerings)
   - [What the M8 port changed](#what-the-m8-port-changed)
+- [Patches](#patches)
+  - [M20 step 3: the annulus](#m20-step-3-the-annulus)
 - [The refinement criterion](#the-refinement-criterion)
   - [The blast wave's calibration recipe](#the-blast-waves-calibration-recipe)
 - [Multi-threading](#multi-threading)
@@ -113,6 +115,29 @@ width and the centering as well as the forest; and `test/device_tests.jl`
 compares the two forms of the refinement criterion on both centerings as
 well as at two precisions. [CODE.md](CODE.md#centerings) describes all of
 these as they are.
+
+## Patches
+
+### M20 step 3: the annulus
+
+TreeAMR's M20 brings TreeWave's scalar wave to the patch systems that
+TreeWaveOLDG runs, as the simplified version of what
+TreeGeneralizedHarmonic needs; the plan is in TreeAMR's `PLAN.md`, under
+M20. Step 3, 2026-11-24, is the four-patch annulus with copied ghosts and
+no TreeAMR change: the Laplacian through TreeMultiPatch's metric, and the
+rotating Bessel mode converging at second order ([CODE.md](CODE.md#patches)
+has the scheme, "Measured results" the numbers). Step 2, TreeWaveOLDG on
+TreeMultiPatch, was set aside for the moment, since another session was
+changing TreeWaveOLDG.
+
+Erik decided that the wave equation on patches is vertex-centred only:
+the cell-centred derivatives the flat box keeps as a comparison are not
+carried over to patches.
+
+TreeMultiPatch is not registered yet, so `Project.toml` and
+`test/Project.toml` reach it through a `[sources]` path, relative to this
+branch's worktree. Registering it is M20's step 6, after which the path
+gives way to a `[compat]` bound like TreeAMR's.
 
 ## The refinement criterion
 
