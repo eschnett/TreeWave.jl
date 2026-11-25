@@ -19,6 +19,10 @@ using SpecialFunctions: besselj0
     include("sinewave_cell_tests.jl")
     include("supergaussian_cell_tests.jl")
     include("blast_cell_tests.jl")
+    # The wave equation on patches, vertex-centred only (TreeAMR's M20):
+    # the annulus, then the seven-patch ball.
+    include("patch_tests.jl")
+    include("ball_tests.jl")
     include("type_tests.jl")
     include("device_tests.jl")
 end

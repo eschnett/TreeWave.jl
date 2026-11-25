@@ -23,6 +23,9 @@ layouts — and, as its other half, conservation at coarse-fine faces
   - [The pulse's sign bug](#the-pulses-sign-bug)
 - [Centerings](#centerings)
   - [What the M8 port changed](#what-the-m8-port-changed)
+- [Patches](#patches)
+  - [M20 step 3: the annulus](#m20-step-3-the-annulus)
+  - [M20 step 5: the seven-patch ball](#m20-step-5-the-seven-patch-ball)
 - [The refinement criterion](#the-refinement-criterion)
   - [The blast wave's calibration recipe](#the-blast-waves-calibration-recipe)
 - [Multi-threading](#multi-threading)
@@ -113,6 +116,54 @@ width and the centering as well as the forest; and `test/device_tests.jl`
 compares the two forms of the refinement criterion on both centerings as
 well as at two precisions. [CODE.md](CODE.md#centerings) describes all of
 these as they are.
+
+## Patches
+
+### M20 step 3: the annulus
+
+TreeAMR's M20 brings TreeWave's scalar wave to the patch systems that
+TreeWaveOLDG runs, as the simplified version of what
+TreeGeneralizedHarmonic needs; the plan is in TreeAMR's `PLAN.md`, under
+M20. Step 3, 2026-11-24, is the four-patch annulus with copied ghosts and
+no TreeAMR change: the Laplacian through TreeMultiPatch's metric, and the
+rotating Bessel mode converging at second order ([CODE.md](CODE.md#patches)
+has the scheme, "Measured results" the numbers). Step 2, TreeWaveOLDG on
+TreeMultiPatch, was set aside for the moment, since another session was
+changing TreeWaveOLDG.
+
+Erik decided that the wave equation on patches is vertex-centred only:
+the cell-centred derivatives the flat box keeps as a comparison are not
+carried over to patches.
+
+TreeMultiPatch is not registered yet, so `Project.toml` and
+`test/Project.toml` reached it through a `[sources]` path, relative to
+this branch's worktree; on 2026-11-25, once it had a repository, the
+path became its GitHub `main`, which CI can reach. Registering it is
+M20's step 6, after which the entry gives way to a `[compat]` bound like
+TreeAMR's.
+
+### M20 step 5: the seven-patch ball
+
+Step 5, 2026-11-24, ahead of step 2 as step 3 was: a plane wave on the
+seven-patch ball, interpolated across every glue with closed ownership
+and the appendix, TreeAMR's M20 step 4, which was not released yet, so
+`[sources]` named TreeAMR's M20 checkout on this branch until 0.2.12
+([The TreeAMR bound](#the-treeamr-bound)). The right-hand
+side gained the appendix, Kreiss–Oliger dissipation of the scheme's
+order plus one, and a boundary hook that follows the time; the ball
+gained the energy and volume by each patch's trapezoidal rule and the
+symmetry measurement ([CODE.md](CODE.md#the-seven-patch-ball-srcballjl)).
+PLAN.md's criteria, and where each is met: the L2 error and the L∞ error
+near the glues converge at second order, 2.02 and 2.21 without
+dissipation, faster at `ε = 1/2` where the dissipation's third-order
+error dominates (`ball_tests.jl`); the energy of the closed ball falls
+monotonically over 33 crossings at `ε = 1/2`; the volume from the
+quadrature converges at 2.00; a solution and its image under point
+inversion evolve into each other's images to rounding; and the
+difference from the mirror image, measured, is rounding as well, at
+7.4e−16, as TreeAMR's prototype found for closed ownership. Unlike the
+prototype's fourth-order scheme, this one was stable at `ε = 0.1`; at
+`ε = 0` it was not.
 
 ## The refinement criterion
 
@@ -313,7 +364,11 @@ for the tests) were left where they were, since nothing newer from them
 is used; the same update resolved SciMLBase 3.58.0,
 OrdinaryDiffEqLowOrderRK 2.2.6, SpecialFunctions 2.9.1 and TreeAMR
 0.2.6. KernelAbstractions stayed at 0.9.45: 0.10 was out, but every
-TreeAMR release so far admits only `0.9.42-0.9` and `1`.
+TreeAMR release so far admits only `0.9.42-0.9` and `1`. It was
+`"0.2.6"` until 2026-11-25, when TreeAMR 0.2.12 was registered with
+the ghosts interpolated across a glue that the seven-patch ball (TreeAMR's
+M20 step 5) needs; the `[sources]` path to TreeAMR's M20 checkout, which
+the ball had used until then, went with it.
 
 ### From two branch pins to one bound
 

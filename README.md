@@ -37,6 +37,15 @@ cell centring needs two. `cellcentered(D)` runs the same studies for
 comparison, and does so in CI. "Centerings" in [CODE.md](CODE.md) has what
 changes and what, measurably, does not.
 
+On TreeAMR's forests of patches, with the maps of
+[TreeMultiPatch](https://github.com/eschnett/TreeMultiPatch.jl), the same
+equation runs in each patch's logical coordinates through the metric,
+vertex-centred only: `annulus_errors` evolves the rotating Bessel mode on
+the four-patch annulus, with Neumann walls, and `ball_errors` a plane
+wave on the seven-patch ball, whose ghosts across its kinked glues
+TreeAMR interpolates; both converge at second order. "Patches" in
+[CODE.md](CODE.md) has the scheme.
+
 ## Running it
 
 ```bash

@@ -165,6 +165,16 @@ Each is the rule; the `CODE.md` section named after it has the reason.
 - **Vertex centring is the default, and cell-centred is kept as the
   comparison.** Do not delete one half to make a change smaller
   ("Centerings").
+- **Patches are vertex-centred only**, by Erik's decision: there is no
+  cell-centred comparison on patches, unlike the flat box, and
+  `PatchWaveProblem` refuses one ("Patches").
+- **On the ball the right-hand side covers the appendix**:
+  `map_blocks!(…; appendix = true)` through `statearray(du, fs; appendix
+  = true)`, and a nonzero dissipation needs `G = 2` ("The seven-patch
+  ball").
+- **The metric is filled at every stored point, never exchanged**:
+  `fill_stored!`, not `fill_by_coordinates!`, which fills the owned
+  points only ("The Laplacian through the metric").
 - **`coordinates(fs, b, idx)` indexes the stored array**, so owned point
   `i` is `idx = i + fs.G[d]`; ask it for a position rather than
   reconstructing one ("Centerings").
@@ -266,6 +276,12 @@ Match TreeAMR's style, since the two are read together:
   script too: nothing in the suite or CI compares them ("Driving a run
   from a script").
 - `bin/output/` is gitignored; the viewer writes PNGs there.
+- **TreeMultiPatch is not registered yet**: `Project.toml` and
+  `test/Project.toml` take it from its GitHub `main` through `[sources]`,
+  and `bin/` inherits that through its path to the package. Registering
+  it is TreeAMR's M20 step 6, after which the entries give way to the
+  `[compat]` bound; a release of TreeWave waits for that, since General
+  refuses a package whose dependency it does not have.
 - `main` is committed and published: `origin` is
   `git@github.com:eschnett/TreeWave.jl.git`, and `main` tracks it. Work on a
   branch; do not push, open a pull request, or merge to `main` without being
