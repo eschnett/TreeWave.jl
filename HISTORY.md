@@ -186,8 +186,9 @@ by the scheme's error. The rule commutes with the mirrors and not with
 the turn, and the apparent growth was that asymmetry crossing to the
 seam. Erik suggested, while this was being found, a 2D model and the
 eigenvalues of the operator; the eigenvalues, at `N = 6`, confirmed that
-the reduced ball has no growing mode at `ε = 1/2`. TreeMultiPatch's balls took `ties`, `:mirror` the old rule and
-`:turn` one that commutes with the turn, a reduced ball's `full` the one
+the reduced ball has no growing mode at `ε = 1/2`. TreeMultiPatch's
+balls took `ties`, `:mirror` the old rule and `:turn` one that commutes
+with the turn, a reduced ball's `full` the one
 its symmetry keeps, and this comparison runs against `full`. All seven
 reductions then agreed to rounding over `t = 2`, and each reduced ball's
 energy fell at every sample to `t = 40`.
@@ -200,6 +201,9 @@ Measured at `roots = (4, 2)`, `refine = 1/2`, `t = 2`: 2.5e-5, 5.0e-5 and
 8.4e-5 of scales 2.8, 5.6 and 8.9 for the bitant, the quadrant and the
 octant. `roots = (4, 1)`, which the step's plan had in mind, is refused:
 a shell's ghosts reach `x = 1/2` into the cube, the refined blocks' face.
+Erik then chose, the same day, to redesign TreeAMR's ownership so that a
+refined mesh keeps its symmetries, a breaking change to TreeAMR, and put
+step 6 on hold until it lands rather than relax its criterion.
 
 ## The refinement criterion
 

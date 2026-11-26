@@ -712,7 +712,10 @@ fine points prolonged, when it is its high face, so the full ball's run
 has no mirror or turn symmetry there, and the reduced ball keeps only the
 high faces. This is TreeAMR's open asymmetry of vertex-like sets at
 coarse–fine faces (its `CODE.md`, "Centerings"), which M21's step 6, as
-written, is the first to ask about.
+written, is the first to ask about. Step 6 is on hold until TreeAMR's
+ownership is redesigned to remove that asymmetry, a breaking change to
+TreeAMR; the refined comparison is to be repeated then, and its
+criterion is to be rounding.
 
 ## Precision
 
