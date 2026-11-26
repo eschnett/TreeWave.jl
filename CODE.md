@@ -174,7 +174,8 @@ outcome for a change that removes no arithmetic.
 
 **Why it is safe, and how that stays checkable.** Every index the kernel
 forms comes from `map_blocks!`, whose contract is that the global index
-runs over the owned range and nothing else; the kernel adds `G[d]` to
+runs over the block's own range — its closed box, `N + 1` points along a
+vertex-like dimension — and nothing else; the kernel adds `G[d]` to
 reach the working array and reads one point either side, which is what
 `G >= 1` guarantees is in bounds and what `cell_indicator` already
 refuses to run without. That makes `@inbounds` an assertion, and an
@@ -382,26 +383,44 @@ at `N = 8` is 11 against 12 per dimension — and one fewer operator whose
 order has to be got right.
 
 **What a stagger changes, and what it does not.** A vertex-like dimension
-stores one plane more, the boundary plane a block *shares* with its
-high-side neighbour, and the exchange fills it exactly as it fills a
-ghost. Ownership stays half-open: a block owns its points `0 … N-1` in
-every dimension, so the state vector still holds `N^D` values per block
-per variable. That is why so little here moved:
+stores one plane more, and from TreeAMR 0.3 (its M22, "Closed blocks") a
+block owns its **closed box**, both face planes: the `N + 1` points `1 …
+N+1` along such a dimension, so a point on a block face is a *shared
+point* with a copy on every block holding it, which the fill makes one
+number (the primary's: the finest level's, there the lowest-lying
+block's). The state vector holds `(N + 1)^D` values per block per
+variable:
 
 | | cell-centred | vertex-centred |
 |---|---|---|
-| owned points per block per dimension | `N` | `N` |
+| own points per block per dimension | `N` | `N + 1`, both face planes |
 | stored points per dimension | `N + 2G` | `N + 2G + 1` |
-| state-vector length | `N^D·nvars·nblocks` | the same |
+| state-vector length | `N^D·nvars·nblocks` | `(N+1)^D·nvars·nblocks` |
 | position of owned point `i` | `origin + (i - ½)h` | `origin + (i-1)h` |
 | restriction at an interface | order-`p` stencil | injection |
 | `G` needed at prolongation order `p` | `p/2` | `p/2 - 1` |
 
 Nothing in the physics knows which it is. `wave_rhs_kernel!` takes no
-`Val(C)`, `WaveProblem` carries none, the Löhner sweep walks the same
-`1:N` owned points, and the boxes it reports mean the same thing. Every
-driver gained a `centering` keyword and passes it to its field sets, and
-that is all any of them do with it.
+`Val(C)`, and `WaveProblem` carries none. The Löhner sweep walks the own
+points, `1:N+1` along a vertex-like dimension, and reports the box of
+the cells touching the points that fired, as TreeAMR's `firing_boxes`
+does, so the boxes mean cells at either centring. Every driver gained a
+`centering` keyword and passes it to its field sets.
+
+Two things follow from the copies, and both are the drivers', not the
+kernels':
+
+- **The integrated state is unified before it is measured.** The
+  integrator carries every copy of a shared point with its own
+  right-hand side, and only the next fill gives the copies one value, so
+  the state vector a solve returns holds stale secondaries. Every driver
+  takes its errors and norms of `unified(u, fs, schedule)`, TreeAMR's
+  `unify!` on a copy; without it the sine wave's L∞ error at a
+  coarse-fine face was `O(1)` ([HISTORY.md](HISTORY.md#closed-blocks)).
+- **A count takes each point once**: `blast_coverage` counts with
+  `primaries = true`; the maxima (`field_scales`, the pulse's peaks, the
+  time step) take every copy with `primaries = false`, which is the same
+  number without the mask.
 
 The rest of the port is M8's *other* change and would have been needed
 with no stagger at all: `fs.G` is an `NTuple{D,Int}` rather than an `Int`
@@ -432,8 +451,8 @@ Three places did have to learn the difference, and all three are about
 - The 2D viewer draws each sample's own dual cell — half a spacing either
   side of the sample — rather than spanning the block extent with `N+1`
   edges. On a vertex mesh those cells are offset half a spacing from the
-  block outlines, which is what half-open ownership looks like when it is
-  drawn, and the cells still tile exactly between same-level neighbours.
+  block outlines, and a block's face samples are drawn by both blocks
+  holding them, the cells still tiling between same-level neighbours.
   The radial panel is the check: a half-cell error there fans the curve
   out, which is indistinguishable at a glance from a discretization
   defect.
@@ -542,9 +561,9 @@ there a copied ghost would make the stencil differentiate a kink; the
 ball's state is a field set interpolated across its glues (TreeAMR's
 `glue = :interpolate`), whose ghosts across a glue are Lagrange
 interpolants in the patch across at the point the target's own map
-names, and which owns every glued face point on each patch holding it,
-the high glued face planes following the cores as the state's appendix
-(TreeAMR's `CODE.md`, "Finite differences across a glue").
+names. Every patch holding a glued face point evolves its own copy, and
+the fill makes the copies their mean (TreeAMR's `CODE.md`, "Finite
+differences across a glue" and "Closed blocks").
 
 ### The Laplacian through the metric
 
@@ -563,15 +582,13 @@ ball's shells they do not. The kernel is `wave_rhs_kernel!` with the
 metric's coefficients, and `wave_rhs!` takes a `PatchWaveProblem` as it
 takes a `WaveProblem`.
 
-**The appendix.** On a set interpolated across a glue the kernel is
-launched with `map_blocks!(…; appendix = true)`, over the closed range,
-and writes through `statearray(du, fs; appendix = true)`, TreeAMR's
-`AppendixArray`: a point on a high glued face plane the block owns is
-evolved like any other, with its own patch's stencil, which reads one
-plane of ghosts beyond it, and a point the block does not own is skipped
-by asking `isowned`. On a set without an appendix the same call is the
-owned range and the cores' array, so the annulus and the ball share the
-kernel.
+**Every copy is evolved.** The kernel runs over each block's closed box,
+so a point on a glued face is evolved by each patch holding it, with its
+own patch's stencil, which reads one plane of ghosts beyond it; on the
+ball the next fill takes their mean, elsewhere the primary's value. The
+annulus and the ball share the kernel. The metric is placed by TreeAMR's
+`nodeposition`, so the copies of a point are at one position bit for
+bit.
 
 **Dissipation.** `PatchWaveProblem` takes a Kreiss–Oliger coefficient
 `ε` with no default: both variables get `-(ε/16h) Σ_a δ_a⁴ w`, fourth
@@ -613,10 +630,9 @@ annulus the speed is largest at the inner wall, `1/(r0 θ′)`.
 **Walls.** The annulus's walls are TreeAMR's reflecting faces, with `u`
 and `v` even. A vertex-centred reflecting face mirrors the ghosts about
 the wall plane, `u(r0 - h) = u(r0 + h)`, which with the metric continued
-below the wall is the ghost-point Neumann condition, second order. The
-low wall `r0` is owned and evolved; the high wall `r1` is TreeAMR's
-derived wall point, of the prolongation order, `4` here, and is not
-evolved (TreeAMR's `CODE.md`, "Centerings").
+below the wall is the ghost-point Neumann condition, second order. Both
+walls, `r0` and `r1`, are own points and evolved (TreeAMR's `CODE.md`,
+"Closed blocks").
 
 ### The rotating Bessel mode on the annulus ([`src/annulus.jl`](src/annulus.jl))
 
@@ -657,8 +673,8 @@ is its own Dirichlet data on the outer sphere (`PlaneWaveHook`), the
 solution TreeWaveOLDG measures the ball with. `ball_errors` returns the
 `√g`-weighted L2 error, through TreeAMR's norm, which counts each
 physical point once, the L∞ error, and the L∞ error within two spacings
-of a glued face, where an interpolated ghost, a patch corner or an
-appendix plane would show first.
+of a glued face, where an interpolated ghost or a patch corner would
+show first.
 
 **The energy and the volume.** `patch_quadrature` sums over each patch's
 closed box with the trapezoidal rule in its logical coordinates, so a
@@ -676,8 +692,9 @@ closed ball, `u = v = 0` beyond the sphere, over many crossing times.
 ball onto itself, patch to patch and node to node (`ball_image`), and
 `ball_asymmetry` evolves random data and its image and compares the
 image of the one with the other, each copy of a glued face point with
-the copy its image is. Under closed ownership each copy is evolved by
-its own patch's stencil, and both symmetries hold to rounding — the
+the copy its image is; every copy of a point a patch holds starts with
+one value, so that the unification picks no side. Each copy is evolved
+by its own patch's stencil, and both symmetries hold to rounding — the
 mirror too, though it turns the shells' quarter turns the other way, as
 TreeAMR's prototype found for closed ownership.
 
@@ -1631,7 +1648,7 @@ an intermediate solution.
 | `src/supergaussian.jl` | the travelling pulse, its AMR driver, and the uniform reference |
 | `src/blast.jl` | the radial blast wave, its Hankel-quadrature exact solution, its AMR driver, and the uniform reference |
 | `src/benchmark.jl` | per-phase and end-to-end timings, for the thread-scaling measurement |
-| `src/patches.jl` | the wave equation on patches: the metric set, `fill_stored!`, the patch RHS kernel with its appendix and dissipation, `PatchWaveProblem`, `patch_timestep` — see Patches |
+| `src/patches.jl` | the wave equation on patches: the metric set, `fill_stored!`, the patch RHS kernel with its dissipation, `PatchWaveProblem`, `patch_timestep` — see Patches |
 | `src/annulus.jl` | the rotating Bessel mode on the four-patch annulus, its wavenumber, forest and convergence driver |
 | `src/ball.jl` | the plane wave on the seven-patch ball, its convergence driver, the patches' quadrature, energy and volume, and the symmetry measurement |
 | `test/sinewave_tests.jl` | convergence order, the interface-order rule, the stagger's two consequences, 3D smoke test, energy drift |
@@ -1755,11 +1772,11 @@ Julia 1.13 is the floor, and the only version CI tests. Who raised it to
 1.13, when and why, and what it was before, is in
 [HISTORY.md](HISTORY.md#the-julia-floor).
 
-TreeAMR is an ordinary `[compat]` bound, `TreeAMR = "0.2.12"` — the rest
-of the `0.2` series from 0.2.12 on, not a pin to one release; 0.2.12 is
-the release that interpolates ghosts across a glue, which the
-seven-patch ball needs ([The seven-patch
-ball](#the-seven-patch-ball-srcballjl)). A resolve
+TreeAMR is an ordinary `[compat]` bound, `TreeAMR = "0.3"` — the `0.3`
+series, not a pin to one release; 0.3 is the release of closed blocks,
+whose layout every vertex-centred driver here follows. Until 0.3 is
+registered, `[sources]` takes TreeAMR and TreeMultiPatch from the
+checkouts beside this one. A resolve
 takes the newest registered `0.2.x`, and the bound is raised only when
 this package comes to need something a newer one added, or when TreeAMR
 breaks its API in a new minor series. Its earlier values are in

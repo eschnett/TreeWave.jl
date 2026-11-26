@@ -168,9 +168,10 @@ function track_pulse(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
         nsteps = max(1, ceilint((t - tstart) / dt))
         sol = solve(ODEProblem(wave_rhs!, u, (tstart, t), problem), RK4();
                     dt=(t - tstart) / nsteps, adaptive=false, save_everystep=false)
-        scatter!(fs, sol.u[end])
+        u = unified(sol.u[end], fs, schedule)
+        scatter!(fs, u)
 
-        observer === nothing || observer(fs, t, sol.u[end])
+        observer === nothing || observer(fs, t, u)
 
         # Error against the exact travelling pulse, on the run's own
         # layout: the difference below is between two state vectors, so
@@ -179,7 +180,7 @@ function track_pulse(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
         fill_by_coordinates!(pulse_exact(D, L, x0, σ, t; n=n), exact)
         ue = statevector(exact)
         gather!(ue, exact)
-        worst = max(worst, volume_weighted_norm(fs, sol.u[end] .- ue; p=Inf))
+        worst = max(worst, volume_weighted_norm(fs, u .- ue; p=Inf))
 
         # How much of the pulse sits in refined blocks -- the measure of
         # whether the refined region is actually following it. Two global
@@ -187,10 +188,10 @@ function track_pulse(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
         # cell by cell from the host and the answer does not depend on how
         # the blocks are distributed; the second sees only refined blocks,
         # which the fold is told through a tag on the key. Both are
-        # maxima, so exact.
+        # maxima, so exact, and the same over every copy of a shared point.
         peaks = mesh_fold(fold_refined_peak, TreeAMR.combine,
                           (Max(zero(T)), Max(zero(T))), fs;
-                          vars=1, tag=key -> level(key) > 0)
+                          vars=1, tag=key -> level(key) > 0, primaries=false)
         total, inside = peaks[1].value, peaks[2].value
         push!(refined_fraction, total > 0 ? inside / total : zero(T))
 
@@ -247,11 +248,11 @@ function uniform_pulse(::Type{T}, ::Val{D}; roots, N, G=2, L=one(T),
     fill_by_coordinates!(pulse_exact(D, L, x0, σ, t_end; n=n), exact)
     ue = statevector(exact)
     gather!(ue, exact)
-    # `cells` counts owned points, which is `N^D` per block whatever the
-    # centering -- a vertex-centred block stores a shared boundary plane
-    # too, but it does not own it.
-    return (err=volume_weighted_norm(fs, sol.u[end] .- ue; p=Inf),
-            cells=nleaves(forest) * N^D)
+    # `cells` counts cells, `N^D` per block whatever the centering -- a
+    # vertex-centred block holds `(N + 1)^D` points, both face planes, the
+    # copies of a shared point on every block that holds it.
+    err = unified(sol.u[end], fs, schedule) .- ue
+    return (err=volume_weighted_norm(fs, err; p=Inf), cells=nleaves(forest) * N^D)
 end
 
 uniform_pulse(valD::Val; kwargs...) = uniform_pulse(Float64, valD; kwargs...)

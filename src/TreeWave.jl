@@ -52,7 +52,7 @@ using Random: Xoshiro
 export hostcopy
 
 # Evolution system
-export WaveProblem, wave_rhs!, convergence_rate
+export WaveProblem, wave_rhs!, unified, convergence_rate
 
 # Initial condition: standing sine mode
 export wave_omega, wave_exact, wave_forest, wave_errors

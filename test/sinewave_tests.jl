@@ -117,18 +117,19 @@ end
                                       centering=cellcentered(D))
 end
 
-@testset "The state vector holds N^D per block at either centring" begin
-    # A vertex-centred block stores one plane more per dimension -- the
-    # boundary plane it shares with its high-side neighbour -- but it does
-    # not *own* it, so the ODE state is the same length and the same shape
-    # as it was. Everything downstream of `statevector` rests on that:
-    # `scatter!`/`gather!`, the RHS launch, and every norm.
+@testset "The state vector holds each block's closed box" begin
+    # A vertex-centred block owns both face planes of each dimension
+    # (TreeAMR 0.3), the copies of a shared point on every block holding
+    # it, so its state holds `(N + 1)^D` points a variable where a
+    # cell-centred block's holds `N^D`. Everything downstream of
+    # `statevector` rests on that: `scatter!`/`gather!`, the RHS launch,
+    # and every norm.
     forest = wave_forest(Val(2), 8; roots=2, refined=false)
     vertex = FieldSet(forest, 2; G=1, centering=vertexcentered(2))
     cell = FieldSet(forest, 2; G=2, centering=cellcentered(2))
 
-    @test length(statevector(vertex)) == forest.N^2 * 2 * nblocks(vertex)
-    @test length(statevector(vertex)) == length(statevector(cell))
+    @test length(statevector(vertex)) == (forest.N + 1)^2 * 2 * nblocks(vertex)
+    @test length(statevector(cell)) == forest.N^2 * 2 * nblocks(cell)
 
     # The stored array is where they differ: N + 2G + 1 against N + 2G.
     @test size(vertex.work)[1:2] == (8 + 2 * 1 + 1, 8 + 2 * 1 + 1)

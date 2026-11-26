@@ -5,8 +5,8 @@
 # symmetry under point inversion and under a mirror. The cube and the six
 # shells meet at kinks, so the ghosts across a glue are TreeAMR's
 # interpolated ones (`glue = :interpolate`), and every glued face point is
-# evolved by each patch holding it, its high glued face planes in the
-# state's appendix. See "The seven-patch ball" in `CODE.md`.
+# evolved by each patch holding it, the fill making the copies their mean
+# (TreeAMR 0.3). See "The seven-patch ball" in `CODE.md`.
 
 """
     PlaneWave(k, φ)
@@ -97,17 +97,19 @@ function ball_problem(::Type{T}=Float64; N, roots=(1, 1), Lc=1, R1=3, G=2, glue=
 end
 
 # Evolve `u0` under `p` from `t0` to `t1` with fixed-step RK4 at `cfl`,
-# landing exactly on `t1`; return the state and the step count.
+# landing exactly on `t1`; return the state, unified (`unified`), and the
+# step count. Across the glues the unified state holds each glued point's
+# copies' mean, as the fill does.
 function patch_evolve(p::PatchWaveProblem{T}, u0, t0, t1; cfl, alg=RK4()) where {T}
     nsteps = max(1, ceilint((t1 - t0) / patch_timestep(p; cfl=cfl)))
     dt = (t1 - t0) / nsteps
     prob = ODEProblem(wave_rhs!, u0, (T(t0), T(t1)), p)
     sol = solve(prob, alg; dt=dt, adaptive=false, save_everystep=false)
-    return sol.u[end], nsteps
+    return unified(sol.u[end], p.fs, p.schedule), nsteps
 end
 
-# The state vector of `fs` filled by `f` at its owned points, its
-# appendix included.
+# The state vector of `fs` filled by `f` at its own points, every copy of
+# a shared point included.
 function filled_state(f, fs)
     fill_by_coordinates!(f, fs)
     u = statevector(fs)
@@ -158,30 +160,44 @@ end
 # The number of cells of patch `q` along each dimension at `N` per block.
 patch_points(layout, q, N) = layout_patches(layout)[q].roots .* N
 
-"""
-    owned_points(fs, u) -> Vector
-
-Every point the state `u` of the field set `fs` holds, its appendix
-included, as `(patch, I, values)`: `I` the point's integer position in its
-patch, in spacings of its block from the patch's low corner, and `values`
-its variables. A point on a glued face appears once for each patch
-holding it. On the CPU and serial: for measurements, not for a run's
-loop.
-"""
-function owned_points(fs::FieldSet{T,D}, u) where {T,D}
+# `f(b, i, q, I)` for every own point of every block of the vertex-centred
+# `fs`, the closed box `1:N+1` along each dimension (TreeAMR 0.3), so
+# every copy of a shared point: `b` the block, `i` the point's index in
+# the block's state, `q` its patch and `I` its integer position in the
+# patch, in spacings of its block from the patch's low corner.
+function each_point(f, fs::FieldSet{T,D}) where {T,D}
     forest = fs.forest
-    a = statearray(u, fs; appendix=true)
-    pts = Tuple{Int,NTuple{D,Int},NTuple{2,T}}[]
     for b in 1:nblocks(fs)
         key = blockkey(fs, b)
         q = patch(forest, key)
         o = block_origin(T, forest, key)
         h = spacing(T, forest, key)
         for i in CartesianIndices(ntuple(_ -> forest.N + 1, D))
-            isowned(a, Tuple(i)..., 1, b) || continue
-            I = ntuple(d -> round(Int, o[d] / h) + i[d] - 1, D)
-            push!(pts, (q, I, (a[Tuple(i)..., 1, b], a[Tuple(i)..., 2, b])))
+            f(b, Tuple(i), q, ntuple(d -> round(Int, o[d] / h) + i[d] - 1, D))
         end
+    end
+    return nothing
+end
+
+"""
+    owned_points(fs, u) -> Vector
+
+Every point the state `u` of the field set `fs` holds, as `(patch, I,
+values)`: `I` the point's integer position in its patch, in spacings of
+its block from the patch's low corner, and `values` its variables. A
+point on a glued face appears once for each patch holding it, as its
+patches evolve it; a point shared by blocks of one patch appears once,
+at the first block holding it, its copies being one number after a fill.
+On the CPU and serial: for measurements, not for a run's loop.
+"""
+function owned_points(fs::FieldSet{T,D}, u) where {T,D}
+    a = statearray(u, fs)
+    pts = Tuple{Int,NTuple{D,Int},NTuple{2,T}}[]
+    seen = Set{Tuple{Int,NTuple{D,Int}}}()
+    each_point(fs) do b, i, q, I
+        (q, I) in seen && return
+        push!(seen, (q, I))
+        push!(pts, (q, I, (a[i..., 1, b], a[i..., 2, b])))
     end
     return pts
 end
@@ -328,20 +344,17 @@ function ball_asymmetry(::Type{T}=Float64; N, symmetry, tend, roots=(1, 1),
     uA = statevector(fs)
     uA .= 2 .* rand(Xoshiro(seed), T, length(uA)) .- 1
     A0 = Dict((q, I) => v for (q, I, v) in owned_points(fs, uA))
+    # Every copy of a point a patch holds set to the one value, in `A`
+    # and in its image `B`: a block holds both face planes (TreeAMR 0.3),
+    # and copies that differed would be unified to whichever is primary,
+    # which the image of `A`'s primary need not be.
     uB = statevector(fs)
-    aB = statearray(uB, fs; appendix=true)
-    for b in 1:nblocks(fs)
-        key = blockkey(fs, b)
-        q = patch(fs.forest, key)
-        o = block_origin(T, fs.forest, key)
-        h = spacing(T, fs.forest, key)
-        for i in CartesianIndices(ntuple(_ -> N + 1, 3))
-            isowned(aB, Tuple(i)..., 1, b) || continue
-            I = ntuple(d -> round(Int, o[d] / h) + i[d] - 1, 3)
-            v = A0[ball_image(layout, symmetry, q, I, N)]
-            aB[Tuple(i)..., 1, b] = v[1]
-            aB[Tuple(i)..., 2, b] = v[2]
-        end
+    aA, aB = statearray(uA, fs), statearray(uB, fs)
+    each_point(fs) do b, i, q, I
+        a = A0[(q, I)]
+        v = A0[ball_image(layout, symmetry, q, I, N)]
+        aA[i..., 1, b], aA[i..., 2, b] = a
+        aB[i..., 1, b], aB[i..., 2, b] = v
     end
     uA, _ = patch_evolve(p, uA, zero(T), T(tend); cfl=cfl)
     uB, _ = patch_evolve(p, uB, zero(T), T(tend); cfl=cfl)

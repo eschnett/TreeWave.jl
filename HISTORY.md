@@ -23,6 +23,7 @@ layouts — and, as its other half, conservation at coarse-fine faces
   - [The pulse's sign bug](#the-pulses-sign-bug)
 - [Centerings](#centerings)
   - [What the M8 port changed](#what-the-m8-port-changed)
+  - [Closed blocks](#closed-blocks)
 - [Patches](#patches)
   - [M20 step 3: the annulus](#m20-step-3-the-annulus)
   - [M20 step 5: the seven-patch ball](#m20-step-5-the-seven-patch-ball)
@@ -116,6 +117,47 @@ width and the centering as well as the forest; and `test/device_tests.jl`
 compares the two forms of the refinement criterion on both centerings as
 well as at two precisions. [CODE.md](CODE.md#centerings) describes all of
 these as they are.
+
+### Closed blocks
+
+TreeAMR 0.3 (its M22, closed blocks) gives a block both face planes of a
+vertex-like dimension, a point on a block face a copy on every block
+holding it; the appendix of M20, the derived high wall point and the
+`closed` and `appendix` keywords are gone. Ported in TreeAMR's M22 step
+10 (2026-11-26):
+
+- The Löhner sweep walks the closed box and reports the cells touching
+  the firing points, as `firing_boxes` does.
+- The patch right-hand side lost its `isowned` test and its `appendix`
+  keywords; `owned_points` and the ball's symmetry check walk the closed
+  box, once per patch holding a point; the metric is placed by
+  `nodeposition`.
+- The reductions say `primaries`: `true` for `blast_coverage`'s count,
+  `false` for the maxima.
+- The drivers measure `unified(u, fs, schedule)`. Without it the
+  vertex-centred sine wave at prolongation order 2 measured L2 0.211,
+  0.144, 0.100 and L∞ 1.58, 1.57, 1.57 at `N = 8, 16, 32` in 1D, a rate
+  of 0.54 where TreeAMR's own copy of the study gave 1.0: the coarse
+  copy of each coarse-fine face point, integrated with the coarse
+  stencil and never read, was what the norm saw. Unified, the numbers
+  are TreeAMR's to the last bit (L2 0.0736, 0.0377, 0.0191).
+- The state-length test now asserts `(N + 1)^D` per block for a
+  vertex-centred set, where it asserted `N^D` and equality with the
+  cell-centred state.
+- The ball's energy from random data (`ball_energies(N = 8, every =
+  10)`), M20's code against the port, `t = 0, 10, …, 160`:
+  314.3 → 297.1, 0.312 → 0.409, 0.0878 → 0.108, 0.0467 → 0.0517,
+  0.0289 → 0.0275, 0.0202 → 0.0165, 0.0149 → 0.0115, 0.0122 → 0.00779,
+  0.00992 → 0.00592, 0.00783 → 0.00488, 0.00687 → 0.00383, 0.00603 →
+  0.00287, 0.00509 → 0.00284, 0.00439 → 0.00208, 0.00392 → 0.00223,
+  0.00345 → 0.00202, 0.00310 → 0.00188. Bounded by the initial energy
+  in both; M20's decreases at every sample after the first, the port's
+  rises once, by 7 %, between `t = 130` and 140. The test's claim, to
+  `t = 40`, holds in both. The data differ from the first sample on:
+  the state is longer, so the same seed fills it differently.
+
+The numbers under "Measured results" in `CODE.md` were not measured
+again for the port; the suite's asserted rates hold.
 
 ## Patches
 

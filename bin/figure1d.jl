@@ -40,7 +40,7 @@ function block_taus(fs, b, scales; vars=1:fs.nvars,
     ws = [blockview(fs, b, v) for v in vars]
     return [maximum(lohner(w[i - 1], w[i], w[i + 1], s; ε=ε)
                     for (w, s) in zip(ws, scales))
-            for i in (G + 1):(G + N)]
+            for i in (G + 1):(G + N + staggers(fs)[1])]
 end
 
 """
@@ -77,7 +77,9 @@ function snapshot(fs, t, exact; scales)
         # because where a point sits depends on the ghost width and the
         # centering, both of which live there: a cell centre is half a
         # spacing inside the block, a vertex is on its low edge.
-        x = [coordinates(fs, b, (i + G,))[1] for i in 1:N]
+        # A block holds `N + 1` points of a vertex-centred dimension, both
+        # face planes (TreeAMR 0.3), and `N` of a cell-centred one.
+        x = [coordinates(fs, b, (i + G,))[1] for i in 1:(N + staggers(fs)[1])]
         num = collect(interiorview(fs, b, 1))
         ex = [exact((xi,), 1) for xi in x]
         ext = block_extent(forest, k)[1]
