@@ -55,19 +55,24 @@ end
 ball_exact(layout, wave::PlaneWave, t) =
     WithPatch(AllVariables(PlaneWaveOn(layout, wave, t)))
 
-# The boundary hook of the plane wave at time `t`: the wave itself beyond
-# the outer sphere.
+# The boundary hook of the plane wave at time `t`: the wave itself on the
+# outer sphere and beyond it. The sphere's plane is an own point of its
+# blocks (TreeAMR 0.3), which `wall = :prescribed` writes from the hook at
+# every fill, a Dirichlet condition, as the hook wrote it when it was a
+# ghost plane.
 struct PlaneWaveHook{L,W}
     layout::L
     wave::W
 end
 
 (h::PlaneWaveHook)(t) = CellBoundary(WithPatch(AllVariables(
-    (ξ, p, δ) -> PlaneWaveOn(h.layout, h.wave, oftype(ξ[1], t))(ξ, p))))
+    (ξ, p, δ) -> PlaneWaveOn(h.layout, h.wave, oftype(ξ[1], t))(ξ, p)));
+    wall=:prescribed)
 
-# Homogeneous Dirichlet data, `u = v = 0` beyond the outer sphere, at any
-# time: the closed ball, whose energy the scheme can only lose.
-zero_hook(t) = CellBoundary(AllVariables((x, δ) -> (zero(x[1]), zero(x[1]))))
+# Homogeneous Dirichlet data, `u = v = 0` on the outer sphere and beyond,
+# at any time: the closed ball, whose energy the scheme can only lose.
+zero_hook(t) = CellBoundary(AllVariables((x, δ) -> (zero(x[1]), zero(x[1])));
+                            wall=:prescribed)
 
 """
     ball_problem([T]; N, roots=(1, 1), Lc=1, R1=3, G=2, glue=4,
@@ -97,15 +102,22 @@ function ball_problem(::Type{T}=Float64; N, roots=(1, 1), Lc=1, R1=3, G=2, glue=
 end
 
 # Evolve `u0` under `p` from `t0` to `t1` with fixed-step RK4 at `cfl`,
-# landing exactly on `t1`; return the state, unified (`unified`), and the
-# step count. Across the glues the unified state holds each glued point's
-# copies' mean, as the fill does.
+# landing exactly on `t1`; return the state as the mesh sees it, and the
+# step count: filled at `t1` and gathered back, so that every copy of a
+# point holds the fill's value — across a glue the copies' mean, and on
+# the outer sphere the hook's, which TreeAMR's `unify!`, without the
+# hook, does not write.
 function patch_evolve(p::PatchWaveProblem{T}, u0, t0, t1; cfl, alg=RK4()) where {T}
     nsteps = max(1, ceilint((t1 - t0) / patch_timestep(p; cfl=cfl)))
     dt = (t1 - t0) / nsteps
     prob = ODEProblem(wave_rhs!, u0, (T(t0), T(t1)), p)
     sol = solve(prob, alg; dt=dt, adaptive=false, save_everystep=false)
-    return unified(sol.u[end], p.fs, p.schedule), nsteps
+    u = sol.u[end]
+    scatter!(p.fs, u)
+    patch_fill!(p, T(t1))
+    u = statevector(p.fs)
+    gather!(u, p.fs)
+    return u, nsteps
 end
 
 # The state vector of `fs` filled by `f` at its own points, every copy of

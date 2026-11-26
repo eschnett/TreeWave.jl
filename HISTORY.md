@@ -155,6 +155,21 @@ holding it; the appendix of M20, the derived high wall point and the
   rises once, by 7 %, between `t = 130` and 140. The test's claim, to
   `t = 40`, holds in both. The data differ from the first sample on:
   the state is longer, so the same seed fills it differently.
+- That port left the outer sphere evolved: its plane, a ghost plane
+  under half-open ownership that the hook wrote, became an own point
+  that the hook no longer touched, so the closed ball was no longer
+  Dirichlet there. The review asked for the energy to `t = 640`; with
+  the hooks made `wall = :prescribed` and the state settled by a fill
+  (`patch_evolve`), and both runs given the same physical data (every
+  point of patch `q` at integer position `I` a hashed value of `(q, I,
+  variable)`), M20 against the port: `E(0)` 316.5 → 280.4 (the first fill
+  treats the two layouts' boundary planes differently; not traced
+  further), `E(10)` 0.5022
+  → 0.5016, `E(160)` 0.00826 → 0.00910, `E(320)` 0.00287 → 0.00318,
+  `E(640)` 0.000530 → 0.000592; `E(320)/E(160)` 0.347 → 0.350,
+  `E(640)/E(480)` 0.436 → 0.437. Both rise at the same three samples,
+  `t = 470`, 500 and 530, by at most 0.1 %, and fall on average
+  throughout.
 
 The numbers under "Measured results" in `CODE.md` were not measured
 again for the port; the suite's asserted rates hold.
