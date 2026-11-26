@@ -213,8 +213,13 @@ function PatchWaveProblem(fs::FieldSet{T,D}, schedule, layout; dissipation,
     # The metric is never exchanged, so its parity is only what the
     # forest's reflecting faces require a set to say; `u`'s does.
     parity = fs.parity === nothing ? nothing : fill(fs.parity[1], metric_nvars(D))
-    metric = FieldSet(fs.forest, metric_nvars(D); G=fs.G, centering=fs.centering,
-                      parity=parity, backend=backend)
+    # Over a forest with a turn (TreeAMR's M21) a set declares how it turns;
+    # the metric is never turned either, so the identity.
+    nm = metric_nvars(D)
+    turns = (fs.rotation === nothing ? (;) : (rotation=Tuple(1:nm),))
+    fs.halfturn === nothing || (turns = merge(turns, (halfturn=Tuple(1:nm),)))
+    metric = FieldSet(fs.forest, nm; G=fs.G, centering=fs.centering,
+                      parity=parity, backend=backend, turns...)
     patches = to_backend(backend, block_patches(fs.forest))
     fill_stored!((ξ, p) -> metric_values(layout, ξ, p, Val(D)), metric, patches)
     spacings = to_backend(backend, block_spacings(fs.forest, T))

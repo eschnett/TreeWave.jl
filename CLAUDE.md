@@ -172,6 +172,10 @@ Each is the rule; the `CODE.md` section named after it has the reason.
   `map_blocks!(…; appendix = true)` through `statearray(du, fs; appendix
   = true)`, and a nonzero dissipation needs `G = 2` ("The seven-patch
   ball").
+- **A reduced ball's oracle is its `full`, not a fresh `SevenPatchBall`.**
+  The full ball's tie rule between two shells (TreeMultiPatch's `ties`)
+  decides which symmetries its run has; the default keeps the mirrors,
+  not the quarter turn ("The seven-patch ball").
 - **The metric is filled at every stored point, never exchanged**:
   `fill_stored!`, not `fill_by_coordinates!`, which fills the owned
   points only ("The Laplacian through the metric").
