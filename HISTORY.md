@@ -162,14 +162,21 @@ holding it; the appendix of M20, the derived high wall point and the
   the hooks made `wall = :prescribed` and the state settled by a fill
   (`patch_evolve`), and both runs given the same physical data (every
   point of patch `q` at integer position `I` a hashed value of `(q, I,
-  variable)`), M20 against the port: `E(0)` 316.5 → 280.4 (the first fill
-  treats the two layouts' boundary planes differently; not traced
-  further), `E(10)` 0.5022
+  variable)`), M20 against the port: `E(0)` 316.5 → 280.4, `E(10)` 0.5022
   → 0.5016, `E(160)` 0.00826 → 0.00910, `E(320)` 0.00287 → 0.00318,
   `E(640)` 0.000530 → 0.000592; `E(320)/E(160)` 0.347 → 0.350,
   `E(640)/E(480)` 0.436 → 0.437. Both rise at the same three samples,
   `t = 470`, 500 and 530, by at most 0.1 %, and fall on average
-  throughout.
+  throughout. The initial energies differ in the data the first fill
+  leaves, not in the quadrature: by region, with the scheme's weights,
+  M20 against the port, the glued face points 70.2 → 43.6, the points
+  next to a face 137.1 → 128.3, the sphere 10.8 → 10.1 and the interior
+  98.4 → 98.4 (bit for bit), over volumes identical to the last digit
+  (112.420 in all, `patch_volume` too). Every patch holding a glued
+  point draws its own value there; M20 evolved each patch's copy as
+  drawn, and the closed fill makes the copies their mean (stage A),
+  which lowers the variance of independent draws, so the glued faces and
+  the gradients next to them carry less energy.
 
 The numbers under "Measured results" in `CODE.md` were not measured
 again for the port; the suite's asserted rates hold.
