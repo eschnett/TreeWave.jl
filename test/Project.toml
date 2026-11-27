@@ -8,12 +8,8 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 TreeAMR = "91bc416d-811c-44c1-9bc4-b9c8bbdbbd08"
 TreeMultiPatch = "7cd1219e-1b18-4d4d-a931-ceef91256e6d"
 
-# TreeAMR 0.3 (M22, closed blocks) and the TreeMultiPatch that takes it
-# are on branches of the checkouts beside this one, not yet released:
-# take them from there. Replace these by the releases once there are.
 [sources]
-TreeAMR = {path = "../../TreeAMR"}
-TreeMultiPatch = {path = "../../TreeMultiPatch"}
+TreeMultiPatch = {url = "https://github.com/eschnett/TreeMultiPatch.jl", rev = "main"}
 
 [compat]
 MultiFloats = "3"
