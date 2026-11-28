@@ -117,9 +117,12 @@ function field_scales(fs::FieldSet{T}; vars=1:fs.nvars) where {T}
     # variable: a fold's point carries all of `vars`, so one sweep, one
     # launch on a device, yields every maximum. The number of variables
     # is known only at run time, so the call below is one dynamic
-    # dispatch; the kernel itself is specialized on it.
+    # dispatch; the kernel itself is specialized on it. A maximum is the
+    # same over every copy of a shared point as over its primary alone
+    # (TreeAMR 0.3), so the fold takes every copy, which skips the mask.
     init = ntuple(_ -> Max(zero(R)), length(vars))
-    peaks = mesh_fold(fold_peaks, TreeAMR.combine, init, fs; vars=vars)
+    peaks = mesh_fold(fold_peaks, TreeAMR.combine, init, fs; vars=vars,
+                      primaries=false)
     return [peak.value for peak in peaks]
 end
 
@@ -167,17 +170,20 @@ end
 """
     cell_indicator(fs, b, box_tol; scales, vars=1:fs.nvars, ε=T(1//100))
 
-The worst [`lohner`](@ref) indicator over every owned point, dimension,
-and variable of block `b`, together with the bounding box of the points
-that exceeded `box_tol`. Returns `(τmax, box)`, with `box` an
-`NTuple{D,UnitRange{Int}}` in the block's own **owned** indices `1:N`
-as TreeAMR's flag boxes are specified, or `nothing` if no point exceeded
-`box_tol`.
+The worst [`lohner`](@ref) indicator over every own point, dimension,
+and variable of block `b`, together with the bounding box of the cells
+holding the points that exceeded `box_tol`. Returns `(τmax, box)`, with
+`box` an `NTuple{D,UnitRange{Int}}` in the block's own **cell** indices
+`1:N` as TreeAMR's flag boxes are specified, or `nothing` if no point
+exceeded `box_tol`.
 
-A block owns `N` points per dimension whatever its centering, so this
-walk and the box it reports are the same for a cell-centred and a
-vertex-centred field set; only the stored index a walked point maps to
-differs, and `fs.G` carries that.
+A block owns its closed box (TreeAMR 0.3): `N` cells along a
+cell-centred dimension and the `N + 1` nodes `1:N+1` along a
+vertex-centred one, both face planes included, so a point on a face is
+walked in every block that holds it. Along a vertex-centred dimension
+the box is the cells touching the firing nodes `lo … hi`, `max(1, lo -
+1):min(N, hi)`, which is what TreeAMR's `firing_boxes` reports: a face
+point then recruits across both faces alike.
 
 Taking the maximum over variables matters for a system: for the
 travelling pulse `∂ₜu` has an order of magnitude more amplitude than `u`,
@@ -190,10 +196,8 @@ arithmetic is [`cell_tau`](@ref), shared with the device form; see
 [`firing_flags`](@ref).
 
 !!! warning "Ghosts must be filled first"
-    The stencil reaches one point beyond the owned range at each face —
-    a ghost on the low side, and on the high side a ghost or, in a
-    vertex-like dimension, the shared boundary plane, which the exchange
-    fills exactly as it fills a ghost. So the caller must `fill_ghosts!`
+    The stencil reaches one point beyond the own range at each face, a
+    ghost on either side. So the caller must `fill_ghosts!`
     before flagging. `regrid!` fills ghosts
     only *after* flags are computed — for the transfer's prolongation —
     so it cannot do this for you, and stale ghosts here corrupt the
@@ -219,11 +223,11 @@ function cell_indicator(fs::FieldSet{T,D}, b::Integer, box_tol;
     lo = ntuple(_ -> N, Val(D))
     hi = ntuple(_ -> 1, Val(D))
 
-    # Over owned indices `1:N`, with the stored index derived -- the
+    # Over own indices `1:N+c`, with the stored index derived -- the
     # same walk TreeAMR's firing kernel makes, so the two forms of the
-    # criterion can be read against each other. `N` is the owned count
-    # for every centering, which is why neither form takes one.
-    for c in CartesianIndices(ntuple(_ -> N, Val(D)))
+    # criterion can be read against each other.
+    st_ = staggers(fs)
+    for c in CartesianIndices(ntuple(d -> N + st_[d], Val(D)))
         i = ntuple(d -> Tuple(c)[d], Val(D))
         idx = ntuple(d -> i[d] + G[d], Val(D))
         τ = cell_tau(fs.work, idx, b, vt, st, ε)
@@ -238,7 +242,9 @@ function cell_indicator(fs::FieldSet{T,D}, b::Integer, box_tol;
         end
     end
 
-    return (τmax, fired ? ntuple(d -> lo[d]:hi[d], Val(D)) : nothing)
+    # The cells touching the firing points (`firing_boxes`).
+    cells(d) = st_[d] == 1 ? (max(1, lo[d] - 1):min(N, hi[d])) : (lo[d]:hi[d])
+    return (τmax, fired ? ntuple(cells, Val(D)) : nothing)
 end
 
 """

@@ -168,10 +168,11 @@ Each is the rule; the `CODE.md` section named after it has the reason.
 - **Patches are vertex-centred only**, by Erik's decision: there is no
   cell-centred comparison on patches, unlike the flat box, and
   `PatchWaveProblem` refuses one ("Patches").
-- **On the ball the right-hand side covers the appendix**:
-  `map_blocks!(…; appendix = true)` through `statearray(du, fs; appendix
-  = true)`, and a nonzero dissipation needs `G = 2` ("The seven-patch
-  ball").
+- **A vertex-centred block holds its closed box** (TreeAMR 0.3): the
+  right-hand side evolves every copy of a shared point, the drivers
+  measure `unified(u, fs, schedule)`, never a solve's raw state, and a
+  count takes `primaries = true` ("Centerings"). On the ball a nonzero
+  dissipation needs `G = 2` ("The seven-patch ball").
 - **The metric is filled at every stored point, never exchanged**:
   `fill_stored!`, not `fill_by_coordinates!`, which fills the owned
   points only ("The Laplacian through the metric").

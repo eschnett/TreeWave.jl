@@ -23,6 +23,7 @@ layouts — and, as its other half, conservation at coarse-fine faces
   - [The pulse's sign bug](#the-pulses-sign-bug)
 - [Centerings](#centerings)
   - [What the M8 port changed](#what-the-m8-port-changed)
+  - [Closed blocks](#closed-blocks)
 - [Patches](#patches)
   - [M20 step 3: the annulus](#m20-step-3-the-annulus)
   - [M20 step 5: the seven-patch ball](#m20-step-5-the-seven-patch-ball)
@@ -116,6 +117,69 @@ width and the centering as well as the forest; and `test/device_tests.jl`
 compares the two forms of the refinement criterion on both centerings as
 well as at two precisions. [CODE.md](CODE.md#centerings) describes all of
 these as they are.
+
+### Closed blocks
+
+TreeAMR 0.3 (its M22, closed blocks) gives a block both face planes of a
+vertex-like dimension, a point on a block face a copy on every block
+holding it; the appendix of M20, the derived high wall point and the
+`closed` and `appendix` keywords are gone. Ported in TreeAMR's M22 step
+10 (2026-11-26):
+
+- The Löhner sweep walks the closed box and reports the cells touching
+  the firing points, as `firing_boxes` does.
+- The patch right-hand side lost its `isowned` test and its `appendix`
+  keywords; `owned_points` and the ball's symmetry check walk the closed
+  box, once per patch holding a point; the metric is placed by
+  `nodeposition`.
+- The reductions say `primaries`: `true` for `blast_coverage`'s count,
+  `false` for the maxima.
+- The drivers measure `unified(u, fs, schedule)`. Without it the
+  vertex-centred sine wave at prolongation order 2 measured L2 0.211,
+  0.144, 0.100 and L∞ 1.58, 1.57, 1.57 at `N = 8, 16, 32` in 1D, a rate
+  of 0.54 where TreeAMR's own copy of the study gave 1.0: the coarse
+  copy of each coarse-fine face point, integrated with the coarse
+  stencil and never read, was what the norm saw. Unified, the numbers
+  are TreeAMR's to the last bit (L2 0.0736, 0.0377, 0.0191).
+- The state-length test now asserts `(N + 1)^D` per block for a
+  vertex-centred set, where it asserted `N^D` and equality with the
+  cell-centred state.
+- The ball's energy from random data (`ball_energies(N = 8, every =
+  10)`), M20's code against the port, `t = 0, 10, …, 160`:
+  314.3 → 297.1, 0.312 → 0.409, 0.0878 → 0.108, 0.0467 → 0.0517,
+  0.0289 → 0.0275, 0.0202 → 0.0165, 0.0149 → 0.0115, 0.0122 → 0.00779,
+  0.00992 → 0.00592, 0.00783 → 0.00488, 0.00687 → 0.00383, 0.00603 →
+  0.00287, 0.00509 → 0.00284, 0.00439 → 0.00208, 0.00392 → 0.00223,
+  0.00345 → 0.00202, 0.00310 → 0.00188. Bounded by the initial energy
+  in both; M20's decreases at every sample after the first, the port's
+  rises once, by 7 %, between `t = 130` and 140. The test's claim, to
+  `t = 40`, holds in both. The data differ from the first sample on:
+  the state is longer, so the same seed fills it differently.
+- That port left the outer sphere evolved: its plane, a ghost plane
+  under half-open ownership that the hook wrote, became an own point
+  that the hook no longer touched, so the closed ball was no longer
+  Dirichlet there. The review asked for the energy to `t = 640`; with
+  the hooks made `wall = :prescribed` and the state settled by a fill
+  (`patch_evolve`), and both runs given the same physical data (every
+  point of patch `q` at integer position `I` a hashed value of `(q, I,
+  variable)`), M20 against the port: `E(0)` 316.5 → 280.4, `E(10)` 0.5022
+  → 0.5016, `E(160)` 0.00826 → 0.00910, `E(320)` 0.00287 → 0.00318,
+  `E(640)` 0.000530 → 0.000592; `E(320)/E(160)` 0.347 → 0.350,
+  `E(640)/E(480)` 0.436 → 0.437. Both rise at the same three samples,
+  `t = 470`, 500 and 530, by at most 0.1 %, and fall on average
+  throughout. The initial energies differ in the data the first fill
+  leaves, not in the quadrature: by region, with the scheme's weights,
+  M20 against the port, the glued face points 70.2 → 43.6, the points
+  next to a face 137.1 → 128.3, the sphere 10.8 → 10.1 and the interior
+  98.4 → 98.4 (bit for bit), over volumes identical to the last digit
+  (112.420 in all, `patch_volume` too). Every patch holding a glued
+  point draws its own value there; M20 evolved each patch's copy as
+  drawn, and the closed fill makes the copies their mean (stage A),
+  which lowers the variance of independent draws, so the glued faces and
+  the gradients next to them carry less energy.
+
+The numbers under "Measured results" in `CODE.md` were not measured
+again for the port; the suite's asserted rates hold.
 
 ## Patches
 

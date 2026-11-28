@@ -279,21 +279,22 @@ function blast_coverage(fs::FieldSet{T}) where {T}
     # values here would give each rank of a distributed mesh its own peak
     # and its own counts. The counts cannot start until the peak is known,
     # so it has a sweep of its own.
-    peak = mesh_mapreduce(abs, max, zero(T), fs; vars=1)
+    peak = mesh_mapreduce(abs, max, zero(T), fs; vars=1, primaries=false)
     finest = maxlevel(fs.forest)
 
     # Both counts in one fold. They are integers, so the totals are exact
     # under any order, and `Int` rather than `0.0`, which would put a
     # `Float64` accumulator in the device kernel, which Metal cannot run.
     # The fine count is told about the tree through a tag on the block's
-    # key.
+    # key. Each point is counted once, at its primary copy (TreeAMR 0.3):
+    # a block holds both face planes of a vertex-like dimension.
     half = peak / 2
     function tally(acc, p)
         hot = abs(p.u[1]) > half
         return TreeAMR.combine(acc, (Sum(Int(hot)), Sum(Int(hot & p.tag))))
     end
     counts = mesh_fold(tally, TreeAMR.combine, (Sum(0), Sum(0)), fs;
-                       vars=1, tag=key -> level(key) == finest)
+                       vars=1, tag=key -> level(key) == finest, primaries=true)
     total, fine = counts[1].value, counts[2].value
     total == 0 && return 1.0
     return fine / total
@@ -415,7 +416,8 @@ function track_blast(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
         sol = solve(ODEProblem(wave_rhs!, u, (tstart, t), problem), RK4();
                     dt=(t - tstart) / nsteps, adaptive=false,
                     save_everystep=false)
-        scatter!(fs, sol.u[end])
+        u = unified(sol.u[end], fs, schedule)
+        scatter!(fs, u)
 
         # Error against the exact ring, at every chunk rather than only at
         # the end: the mesh is rebuilt twenty times over the run and the
@@ -425,7 +427,7 @@ function track_blast(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
                              exact)
         ue = statevector(exact)
         gather!(ue, exact)
-        worst = max(worst, volume_weighted_norm(fs, sol.u[end] .- ue; p=Inf))
+        worst = max(worst, volume_weighted_norm(fs, u .- ue; p=Inf))
 
         # The indicator reads a 3-point stencil, so it needs ghosts; and
         # `regrid!` fills them only afterwards, for the transfer.
@@ -437,7 +439,7 @@ function track_blast(::Type{T}, ::Val{D}; N=8, G=2, roots=8, L=one(T),
         # ones the flagging below will actually use, so an observer drawing τ
         # draws the value the mesh is about to act on -- and still before
         # the regrid that would invalidate `fs`.
-        observer === nothing || observer(fs, t, sol.u[end])
+        observer === nothing || observer(fs, t, u)
 
         # No regrid after the final chunk: it would only leave the caller
         # holding a mesh that no returned solution was ever computed on,
@@ -495,8 +497,8 @@ function uniform_blast(::Type{T}, ::Val{2}; roots, N, G=2, L=one(T),
                          exact)
     ue = statevector(exact)
     gather!(ue, exact)
-    return (err=volume_weighted_norm(fs, sol.u[end] .- ue; p=Inf),
-            l2=volume_weighted_norm(fs, sol.u[end] .- ue),
+    err = unified(sol.u[end], fs, schedule) .- ue
+    return (err=volume_weighted_norm(fs, err; p=Inf), l2=volume_weighted_norm(fs, err),
             h=minimum_spacing(forest), cells=nleaves(forest) * N^2)
 end
 

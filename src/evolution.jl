@@ -84,6 +84,21 @@ function wave_rhs!(du, u, p, t)
     return nothing
 end
 
+"""
+    unified(u, fs, schedule)
+
+A copy of the state vector `u` of `fs` with every secondary copy of a
+shared point given its primary's value (TreeAMR's `unify!`). A
+vertex-centred block holds both face planes (TreeAMR 0.3), so a point on
+a block face has a copy on every block holding it, and the integrator
+carries each copy along with its own right-hand side; the fill gives the
+copies one value before anything reads them, but the state vector the
+integrator returns still holds the secondaries as integrated. What is
+measured or handed on is the state as the mesh sees it, so the drivers
+unify before taking an error or a norm.
+"""
+unified(u, fs, schedule) = unify!(copy(u), fs, schedule)
+
 """Least-squares convergence rate of `errs` against spacings `hs`."""
 function convergence_rate(hs, errs)
     x = log.(hs)

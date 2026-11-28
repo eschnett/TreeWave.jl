@@ -118,8 +118,8 @@ TreeAMR's forest of the four-patch annulus `layout`, `N` cells per block
 along each dimension, with both walls reflecting: a vertex-centred
 reflecting face mirrors the ghosts about the wall plane, `u(r0 - h) =
 u(r0 + h)`, which is the Neumann condition `∂_r u = 0` to second order.
-The low wall `r0` is owned and evolved; the high wall `r1` is TreeAMR's
-derived wall point (TreeAMR's `CODE.md`, "Centerings").
+Both walls, `r0` and `r1`, are own points of their blocks and evolved
+(TreeAMR 0.3, "Closed blocks" in its `CODE.md`).
 """
 annulus_forest(::Type{T}, layout::PolarAnnulus; N) where {T} =
     layout_forest(T, layout; N=N, reflecting=((false, false), (true, true)))
@@ -141,8 +141,10 @@ per block, to `tend`, by default a quarter turn of its pattern,
 Return the `√g`-weighted L2 error of `u` and `v` together, the L∞ error,
 the physical radial spacing `h`, the step count and the number of blocks.
 
-The time step is [`patch_timestep`](@ref). `ops` sets the order of
-TreeAMR's derived high wall point; the mesh has no refinement.
+The time step is [`patch_timestep`](@ref). `ops` are the ghost
+schedule's operators; the mesh has no refinement. (Before TreeAMR 0.3
+they also set the order of the derived high wall point, which closed
+blocks removed: the high wall is evolved like the low one.)
 Vertex-centred: see [`PatchWaveProblem`](@ref).
 """
 function annulus_errors(::Type{T}=Float64; N, roots=(2, 1), r0=1, r1=2, m::Integer=1,
@@ -169,7 +171,7 @@ function annulus_errors(::Type{T}=Float64; N, roots=(2, 1), r0=1, r1=2, m::Integ
     fill_by_coordinates!(annulus_exact(layout, m, k, t_end), exact)
     uexact = statevector(exact)
     gather!(uexact, exact)
-    err = sol.u[end] .- uexact
+    err = unified(sol.u[end], fs, problem.schedule) .- uexact
 
     # `√g`-weighted, through the square root of `√g` at each owned point
     # as a state vector of `fs`'s layout: the norm of `w e` over the norm

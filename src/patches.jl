@@ -47,15 +47,20 @@ end
 # the owned points only, since the ghosts are the exchange's; but a
 # coefficient is known everywhere the map is, and the stencil reads it at
 # the ghosts too. Vertex-centred: stored index `idx` is owned point
-# `idx - G`, at `origin + (idx - G - 1) h`.
-@kernel function stored_fill_kernel!(work, f, @Const(origins), @Const(spacings),
-                                     @Const(patches), ::Val{D}, ::Val{G}) where {D,G}
+# `idx - G`, placed by TreeAMR's `nodeposition`, so that the copies of a
+# shared point, on every block that holds it (TreeAMR 0.3), are at one
+# position bit for bit.
+@kernel function stored_fill_kernel!(work, f, @Const(lows), @Const(bases),
+                                     @Const(spacings), @Const(patches), ::Val{D},
+                                     ::Val{G}) where {D,G}
     I = @index(Global, NTuple)                 # stored index, block
     b = I[D + 1]
     idx = ntuple(d -> I[d], Val(D))
-    o = origins[b]
+    lo = lows[b]
+    B = bases[b]
     h = spacings[b]
-    ξ = ntuple(d -> o[d] + (idx[d] - G[d] - 1) * h, Val(D))
+    ξ = ntuple(d -> TreeAMR.nodeposition(lo[d], h, B[d], idx[d] - G[d], 1, nothing),
+               Val(D))
     vals = f(ξ, patches[b])
     for v in eachindex(vals)
         work[idx..., v, b] = vals[v]
@@ -66,7 +71,7 @@ end
     fill_stored!(f, fs, patches)
 
 Set every stored point of every block of the vertex-centred `fs`, ghosts
-and the shared high plane included, from `f(ξ, p) -> vals`, where `ξ` is
+included, from `f(ξ, p) -> vals`, where `ξ` is
 the point's logical position in patch `p` and `vals` a tuple of
 `fs.nvars` values. `patches` is [`block_patches`](@ref) on the field
 set's backend. For what is known in closed form wherever the map is
@@ -79,9 +84,10 @@ function fill_stored!(f, fs::FieldSet{T,D}, patches) where {T,D}
         "fill_stored! places points as vertices, and this field set is not " *
         "vertex-centred"))
     backend = get_backend(fs.work)
-    origins = to_backend(backend, block_origins(fs.forest, T))
+    lows = to_backend(backend, block_lows(fs.forest, T))
+    bases = to_backend(backend, block_bases(fs.forest))
     spacings = to_backend(backend, block_spacings(fs.forest, T))
-    map_blocks!(stored_fill_kernel!, fs, fs.work, f, origins, spacings, patches,
+    map_blocks!(stored_fill_kernel!, fs, fs.work, f, lows, bases, spacings, patches,
                 Val(D), Val(fs.G); stored=true)
     synchronize(backend)
     return fs
@@ -95,13 +101,12 @@ end
 # Kreiss–Oliger dissipation of the scheme's order, `-(ε/16h) Σ_a δ_a⁴ w`,
 # which reads two points out and needs `G ≥ 2`.
 #
-# On a set interpolated across a glue the launch covers the closed range
-# and `du` is TreeAMR's `AppendixArray`, which keeps the high glued face
-# planes a block owns and drops the rest; `isowned` skips those. On any
-# other set `du` is the cores' array and the range the owned one.
-# `@inbounds` as in `wave_rhs_kernel!`: the stencil reaches `1 + (ε ≠ 0)`
-# points past `c`, at most `N + 1 + G` along a dimension, which `G` puts
-# within the stored array.
+# The launch covers each block's closed box (TreeAMR 0.3), every copy of
+# a shared point, which the next fill makes one number: across a glue
+# the set is interpolated at, their mean; elsewhere the primary's.
+# `@inbounds` as in `wave_rhs_kernel!`: the stencil reaches `1 + (ε ≠ 0)
+# ≤ G` points past `c`, so at most `N + 1 + 2G` along a dimension, the
+# stored array's last index.
 @kernel function patch_wave_rhs_kernel!(du, @Const(work), @Const(metric),
                                         @Const(spacings), ε, ::Val{D},
                                         ::Val{G}) where {D,G}
@@ -110,48 +115,46 @@ end
     inner = ntuple(d -> I[d], Val(D))          # state-layout index
     c = ntuple(d -> I[d] + G[d], Val(D))       # working-array index
 
-    if isowned(du, inner..., 1, b)
-        @inbounds u0 = work[c..., 1, b]
-        flux = zero(eltype(du))
-        @inbounds for a in 1:D
-            up = Base.setindex(c, c[a] + 1, a)
-            um = Base.setindex(c, c[a] - 1, a)
-            k = metric_index(a, a, Val(D))
-            A0 = metric[c..., k, b]
-            Ap = (A0 + metric[up..., k, b]) / 2
-            Am = (A0 + metric[um..., k, b]) / 2
-            flux += Ap * (work[up..., 1, b] - u0) - Am * (u0 - work[um..., 1, b])
-            for e in 1:D
-                e == a && continue
-                k = metric_index(min(a, e), max(a, e), Val(D))
-                δp = work[Base.setindex(up, up[e] + 1, e)..., 1, b] -
-                     work[Base.setindex(up, up[e] - 1, e)..., 1, b]
-                δm = work[Base.setindex(um, um[e] + 1, e)..., 1, b] -
-                     work[Base.setindex(um, um[e] - 1, e)..., 1, b]
-                flux += (metric[up..., k, b] * δp - metric[um..., k, b] * δm) / 4
-            end
+    @inbounds u0 = work[c..., 1, b]
+    flux = zero(eltype(du))
+    @inbounds for a in 1:D
+        up = Base.setindex(c, c[a] + 1, a)
+        um = Base.setindex(c, c[a] - 1, a)
+        k = metric_index(a, a, Val(D))
+        A0 = metric[c..., k, b]
+        Ap = (A0 + metric[up..., k, b]) / 2
+        Am = (A0 + metric[um..., k, b]) / 2
+        flux += Ap * (work[up..., 1, b] - u0) - Am * (u0 - work[um..., 1, b])
+        for e in 1:D
+            e == a && continue
+            k = metric_index(min(a, e), max(a, e), Val(D))
+            δp = work[Base.setindex(up, up[e] + 1, e)..., 1, b] -
+                 work[Base.setindex(up, up[e] - 1, e)..., 1, b]
+            δm = work[Base.setindex(um, um[e] + 1, e)..., 1, b] -
+                 work[Base.setindex(um, um[e] - 1, e)..., 1, b]
+            flux += (metric[up..., k, b] * δp - metric[um..., k, b] * δm) / 4
         end
-        @inbounds h = spacings[b]
-        @inbounds J = metric[c..., 1, b]
-        @inbounds v0 = work[c..., 2, b]
-        du_u = v0
-        du_v = flux / (J * h * h)
-        if !iszero(ε)
-            σ = ε / (16 * h)
-            @inbounds for a in 1:D
-                c1 = Base.setindex(c, c[a] + 1, a)
-                c2 = Base.setindex(c, c[a] + 2, a)
-                m1 = Base.setindex(c, c[a] - 1, a)
-                m2 = Base.setindex(c, c[a] - 2, a)
-                du_u -= σ * (work[c2..., 1, b] - 4 * work[c1..., 1, b] + 6 * u0 -
-                             4 * work[m1..., 1, b] + work[m2..., 1, b])
-                du_v -= σ * (work[c2..., 2, b] - 4 * work[c1..., 2, b] + 6 * v0 -
-                             4 * work[m1..., 2, b] + work[m2..., 2, b])
-            end
-        end
-        @inbounds du[inner..., 1, b] = du_u
-        @inbounds du[inner..., 2, b] = du_v
     end
+    @inbounds h = spacings[b]
+    @inbounds J = metric[c..., 1, b]
+    @inbounds v0 = work[c..., 2, b]
+    du_u = v0
+    du_v = flux / (J * h * h)
+    if !iszero(ε)
+        σ = ε / (16 * h)
+        @inbounds for a in 1:D
+            c1 = Base.setindex(c, c[a] + 1, a)
+            c2 = Base.setindex(c, c[a] + 2, a)
+            m1 = Base.setindex(c, c[a] - 1, a)
+            m2 = Base.setindex(c, c[a] - 2, a)
+            du_u -= σ * (work[c2..., 1, b] - 4 * work[c1..., 1, b] + 6 * u0 -
+                         4 * work[m1..., 1, b] + work[m2..., 1, b])
+            du_v -= σ * (work[c2..., 2, b] - 4 * work[c1..., 2, b] + 6 * v0 -
+                         4 * work[m1..., 2, b] + work[m2..., 2, b])
+        end
+    end
+    @inbounds du[inner..., 1, b] = du_u
+    @inbounds du[inner..., 2, b] = du_v
 end
 
 """
@@ -175,8 +178,8 @@ or a function of the time returning the `boundary` that `fill_ghosts!`
 takes, a `CellBoundary`, for the hook that fills them.
 
 `fs` may be interpolated across a glue (`glue = :interpolate`), as on a
-ball: the right-hand side then covers the appendix, the glued high face
-planes each patch owns.
+ball: every patch holding a glued point evolves its own copy, and the
+fill makes the copies their mean.
 
 [`wave_rhs!`](@ref) takes it as it takes a [`WaveProblem`](@ref), and
 [`patch_timestep`](@ref) gives its time step. The layout's maps are
@@ -226,12 +229,10 @@ function PatchWaveProblem(fs::FieldSet{T,D}, schedule, layout; dissipation,
 end
 
 # The right-hand side from ghosts already filled, which a test of the
-# operator sets itself. `appendix = true` is ignored on a set without
-# one, where `statearray` is the cores' array.
+# operator sets itself.
 function patch_rhs!(du, p::PatchWaveProblem)
-    map_blocks!(patch_wave_rhs_kernel!, p.fs, statearray(du, p.fs; appendix=true),
-                p.fs.work, p.metric.work, p.spacings, p.ε, p.valD, p.valG;
-                appendix=true)
+    map_blocks!(patch_wave_rhs_kernel!, p.fs, statearray(du, p.fs), p.fs.work,
+                p.metric.work, p.spacings, p.ε, p.valD, p.valG)
     return nothing
 end
 
@@ -258,6 +259,6 @@ coordinates the stencil is written in, where the speed of light is
 function patch_timestep(p::PatchWaveProblem{T,D}; cfl) where {T,D}
     forest = p.fs.forest
     rate = mesh_mapreduce(identity, max, zero(T), p.metric; vars=metric_nvars(D),
-                          weight=key -> inv(spacing(T, forest, key)))
+                          weight=key -> inv(spacing(T, forest, key)), primaries=false)
     return T(cfl) / rate
 end

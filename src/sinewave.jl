@@ -143,8 +143,9 @@ function wave_errors(::Type{T}, ::Val{D}; N, G=1,
 
     if observer !== nothing
         for (i, t) in enumerate(sol.t)
-            scatter!(fs, sol.u[i])
-            observer(fs, t, sol.u[i])
+            ui = unified(sol.u[i], fs, problem.schedule)
+            scatter!(fs, ui)
+            observer(fs, t, ui)
         end
     end
 
@@ -157,7 +158,7 @@ function wave_errors(::Type{T}, ::Val{D}; N, G=1,
     uexact = statevector(exact)
     gather!(uexact, exact)
 
-    err = sol.u[end] .- uexact
+    err = unified(sol.u[end], fs, problem.schedule) .- uexact
     return (l2=volume_weighted_norm(fs, err),
             linf=volume_weighted_norm(fs, err; p=Inf),
             h=h, nsteps=nsteps, nblocks=nleaves(forest))

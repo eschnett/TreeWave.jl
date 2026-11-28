@@ -51,14 +51,19 @@ end
          for v in vars]
     @test field_scales(fs) == serial_scales(fs)
 
+    # Each point counted once, at its primary copy: a block holds both
+    # face planes of a vertex-like dimension (TreeAMR 0.3).
     function serial_coverage(fs)
         peak = maximum(b -> maximum(abs, interiorview(fs, b, 1)), 1:nblocks(fs))
         finest = maximum(b -> level(blockkey(fs, b)), 1:nblocks(fs))
+        mask = primary_mask(fs)
         hot, fine = 0, 0
         for b in 1:nblocks(fs)
             isfine = level(blockkey(fs, b)) == finest
-            for value in interiorview(fs, b, 1)
-                abs(value) > peak / 2 || continue
+            view = interiorview(fs, b, 1)
+            for i in CartesianIndices(view)
+                isprimary(mask, Tuple(i)..., b) || continue
+                abs(view[i]) > peak / 2 || continue
                 hot += 1
                 isfine && (fine += 1)
             end
